@@ -76,6 +76,8 @@ class MatrixSlice:
             self.row_width = 0
             self.bit_levels = []
             self.target_accumulators = []
+
+        self.numpy_array = self.to_numpy_array()
     
     def __len__(self):
         """返回 TransRow 的数量。"""

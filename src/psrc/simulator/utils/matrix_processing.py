@@ -41,7 +41,7 @@ def create_transrow_tasks_from_matrix(W_int, S_bits):
         raise ValueError("输入的权重矩阵 W_int 必须是二维的。")
     N, K = W_int.shape # N=原始行数, K=原始列数(即TransRow宽度T)
 
-    print(f"正在从 {N}x{K} (S={S_bits}) 矩阵生成 {S_bits*N} 个 TransRow 任务...")
+    #print(f"正在从 {N}x{K} (S={S_bits}) 矩阵生成 {S_bits*N} 个 TransRow 任务...")
 
     # 1. 创建一个临时的 S*N x K 结构来存储二元数据
     #    我们使用一个列表的列表来构建
@@ -78,5 +78,5 @@ def create_transrow_tasks_from_matrix(W_int, S_bits):
         task = TransRow(binary_row_data, bit_level, original_row_idx)
         task_list.append(task)
         
-    print(f"成功创建 {len(task_list)} 个任务。")
+    #print(f"成功创建 {len(task_list)} 个任务。")
     return task_list
