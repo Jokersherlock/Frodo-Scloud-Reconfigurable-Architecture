@@ -47,12 +47,12 @@ def get_distribution(mode):
     return dis,n,S_bits
 
 
-def Sparse_evaluation(mode,batch_size,multiply_type,n_engines=4):
+def Sparse_evaluation(mode,batch_size,multiply_type,n_engines=4,accumulator_strategy="double_registers"):
     #不使用稀疏
     sim = Simulator()
     simulate_enable = False
     sparse_enable = False
-    mmu = MMU("mmu",sim,data_simulate_enable=simulate_enable,sparse_enable=sparse_enable,n_engines=n_engines)
+    mmu = MMU("mmu",sim,data_simulate_enable=simulate_enable,sparse_enable=sparse_enable,n_engines=n_engines,accumulator_strategy=accumulator_strategy)
     dis,n,S_bits = get_distribution(mode)
     if multiply_type == "left":
         S_matrix = ProbabilityDistribution(dis).generate_matrix(shape=(n,8))
@@ -77,7 +77,7 @@ def Sparse_evaluation(mode,batch_size,multiply_type,n_engines=4):
         sim = Simulator()
         simulate_enable = False
         sparse_enable = True
-        mmu = MMU("mmu",sim,data_simulate_enable=simulate_enable,sparse_enable=sparse_enable,n_engines=n_engines)
+        mmu = MMU("mmu",sim,data_simulate_enable=simulate_enable,sparse_enable=sparse_enable,n_engines=n_engines,accumulator_strategy=accumulator_strategy)
         if multiply_type == "left": 
             S_matrix = ProbabilityDistribution(dis).generate_matrix(shape=(n,8))
             A = np.random.randint(-7, 8, size=(4,n))
@@ -146,18 +146,19 @@ if __name__ == "__main__":
     sim = Simulator()
     simulate_enable = False
     sparse_enable = False
-    mmu = MMU("mmu",sim,data_simulate_enable=simulate_enable,sparse_enable=sparse_enable)
-    mode = "Scloud"
+    accumulator_strategy = "no_fifo"
+    mmu = MMU("mmu",sim,data_simulate_enable=simulate_enable,sparse_enable=sparse_enable,accumulator_strategy=accumulator_strategy)
+    mode = "Frodo-1344"
     n_engines = 4
     batch_size = 10
     dis,n,S_bits = get_distribution(mode)
 
     print("测试mmu左乘,mode:",mode)
-    stats, latency_array = Sparse_evaluation(mode,batch_size,"left",n_engines=n_engines)
+    stats, latency_array = Sparse_evaluation(mode,batch_size,"left",n_engines=n_engines,accumulator_strategy=accumulator_strategy)
     print("stats",stats)
 
     print("测试mmu右乘,mode:",mode)
-    stats, latency_array = Sparse_evaluation(mode,batch_size,"right",n_engines=n_engines)
+    stats, latency_array = Sparse_evaluation(mode,batch_size,"right",n_engines=n_engines,accumulator_strategy=accumulator_strategy)
     print("stats",stats)
 
     # print("测试mmu左乘")

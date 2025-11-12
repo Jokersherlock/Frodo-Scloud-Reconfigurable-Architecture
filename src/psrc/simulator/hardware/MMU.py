@@ -111,13 +111,31 @@ class Engine(HwModule):
         else:
             raise ValueError("S_bits只能是2或5")
         return latency
-    def _caculate_latency(self,fifo_list,S_bits=5):
-        if self.accumulator_strategy == "double_registers":
-            return self._caculate_latency_double_registers(fifo_list,S_bits)
-        elif self.accumulator_strategy == "bank_ram":
-            return self._caculate_latency_single_register(fifo_list,S_bits) + self.bank_ram_latency
+    
+    def _caculate_latency_no_fifo(self,matrix_slice,S_bits=5):
+        #无fifo默认不使用稀疏
+        num_rows = matrix_slice.num_rows
+        if S_bits == 5:
+            latency = num_rows//5
+        elif S_bits == 2:
+            latency = num_rows//2
         else:
-            raise ValueError("accumulator_strategy只能是double_registers,bank_ram")
+            raise ValueError("S_bits只能是2或5")
+        
+        latency += 2 #加法树两级延迟
+
+        return latency
+
+
+    def _caculate_latency(self,fifo_list,matrix_slice,S_bits=5):
+        if self.accumulator_strategy == "double_registers":
+            return self._caculate_latency_double_registers(fifo_list,S_bits) + 1 #fifo latency为1
+        elif self.accumulator_strategy == "bank_ram":
+            return self._caculate_latency_double_registers(fifo_list,S_bits) + self.bank_ram_latency + 1 #fifo latency为1
+        elif self.accumulator_strategy == "no_fifo":
+            return self._caculate_latency_no_fifo(matrix_slice,S_bits)
+        else:
+            raise ValueError("accumulator_strategy只能是double_registers,bank_ram,no_fifo")
 
     def _caculate(self,fifo_list,weights_matrix,S_bits=5):
         #左乘时，4个PE处理4行不同的数据
@@ -148,8 +166,8 @@ class Engine(HwModule):
                                 else:
                                     # 其他位对应的部分和是加上
                                     accumulator[i][index] += (input_val << shift_amount)
-        latency = self._caculate_latency(fifo_list,S_bits)
-        return accumulator,latency
+        #latency = self._caculate_latency(fifo_list,S_bits)
+        return accumulator
         
     def execute_left(self,S_matrix,A_matrix,S_bits=5):
         
@@ -182,10 +200,11 @@ class Engine(HwModule):
             #print("S_slice",S_slice)
             S_slice = self.slice(S_slice,S_bits)
             fifo_list = self.fifo(S_slice,S_bits)
-            accumulator,caculate_latency = self._caculate(fifo_list,A_matrix[:,i*4:(i+1)*4],S_bits)
+            accumulator = self._caculate(fifo_list,A_matrix[:,i*4:(i+1)*4],S_bits)
+            caculate_latency = self._caculate_latency(fifo_list,S_slice,S_bits)
             result_matrix += accumulator[:,0:S_matrix.shape[1]]
             latency += caculate_latency
-            latency += 3 #假设slice latency为1,fifo latency为1,更新A需要1
+            latency += 2 #假设slice latency为1,更新A需要1
         
         self._increment_stat("total_latency_calculated", latency)
         yield self.sim.delay(latency)
@@ -221,10 +240,11 @@ class Engine(HwModule):
             #print("S_slice",S_slice)
             S_slice = self.slice(S_matrix,S_bits)
             fifo_list = self.fifo(S_slice,S_bits)
-            accumulator,caculate_latency = self._caculate(fifo_list,A_matrix[:,i*4:(i+1)*4].T,S_bits)
+            accumulator = self._caculate(fifo_list,A_matrix[:,i*4:(i+1)*4].T,S_bits)
+            caculate_latency = self._caculate_latency(fifo_list,S_slice,S_bits)
             result_matrix[i*4:(i+1)*4,:]= accumulator[:,0:S_matrix.shape[0]]
             latency += caculate_latency
-            latency += 3 #假设slice latency为1,fifo latency为1,更新A需要1
+            latency += 2 #假设slice latency为1,更新A需要1
         result_matrix = result_matrix.T
         yield self.sim.delay(latency)
        
