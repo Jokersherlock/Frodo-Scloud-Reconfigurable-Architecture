@@ -19,6 +19,9 @@ class Engine(HwModule):
         self.accumulator_strategy = accumulator_strategy
         self.bank_ram_latency = bank_ram_latency
 
+        #self._register_stat("total_cycles_busy",0)
+        self._register_stat("total_latency_calculated", 0)
+
     def slice(self,matrix,S_bits=5):
         return MatrixSlice(create_transrow_tasks_from_matrix(matrix,S_bits))
 
@@ -141,6 +144,13 @@ class Engine(HwModule):
         return accumulator,latency
         
     def execute_left(self,S_matrix,A_matrix,S_bits=5):
+        
+        if self.busy:
+            raise ValueError("Engine正在繁忙")
+            return None,None
+
+        self._set_busy()
+
         #左乘
         #4*m m*nbar
         if S_matrix.shape[1] != self.nbar & S_matrix.shape[1] != 8:
@@ -169,11 +179,18 @@ class Engine(HwModule):
             latency += caculate_latency
             latency += 3 #假设slice latency为1,fifo latency为1,更新A需要1
         
-        #yield self.sim.delay(latency)
+        self._increment_stat("total_latency_calculated", latency)
+        yield self.sim.delay(latency)
+        self._set_idle()
 
         return result_matrix,latency
 
     def execute_right(self,S_matrix,A_matrix,S_bits=5):
+        if self.busy:
+            raise ValueError("Engine正在繁忙")
+            return None,None
+        self._set_busy()
+
         #右乘
         #mbar*4 4*n
         if S_matrix.shape[0] != self.nbar & S_matrix.shape[0] != 8:
@@ -201,7 +218,12 @@ class Engine(HwModule):
             latency += caculate_latency
             latency += 3 #假设slice latency为1,fifo latency为1,更新A需要1
         result_matrix = result_matrix.T
-        #yield self.sim.delay(latency)
+        yield self.sim.delay(latency)
+       
+        self._increment_stat("total_latency_calculated", latency)
+        #self._increment_stat("total_busy_cycles", latency)
+
+        self._set_idle()
 
         return result_matrix,latency
         
