@@ -55,10 +55,10 @@ class Engine(HwModule):
         elif S_bits == 2:
             if matrix_slice.num_rows%2 != 0:
                 raise ValueError("slice矩阵行数不是2的倍数")
-            for i in range(matrix_slice.num_rows//4):
-                for j in range(4):
-                    if matrix_slice.trans_rows[i*4+j].popcount != 0:
-                       fifo_list[j].append(matrix_slice.trans_rows[i*2+j])
+            for i in range(matrix_slice.num_rows//2):
+                for j in range(2):
+                    if matrix_slice.trans_rows[i*2+j].popcount != 0:
+                        fifo_list[i%2+j].append(matrix_slice.trans_rows[i*2+j])
             for i in range(5):
                 fifo_list[i] = MatrixSlice(fifo_list[i])
             return fifo_list
@@ -130,7 +130,7 @@ class Engine(HwModule):
                                 # 检查是否为 MSB (最高有效位)
                                 is_msb = (shift_amount == (S_bits - 1)) # S_bits=5, MSB=4
                                 # 获取 A_in[i, k] 的值 (假设A_in全为正数，如您所测)
-                                input_val = weights_matrix[i][j] 
+                                input_val = weights_matrix[i][j]
                                 if is_msb:
                                     # MSB 对应的部分和必须被减去
                                     accumulator[i][index] -= (input_val << shift_amount)
@@ -151,7 +151,7 @@ class Engine(HwModule):
             raise ValueError("A_matrix列数不等于S_matrix行数")
         if A_matrix.shape[0] != 4:
             raise ValueError("A_matrix行数不是4")
-        if S_bits != 5 & S_bits != 2:
+        if S_bits != 5 and S_bits != 2:
             raise ValueError("S_bits只能是2或5")
         
         #暂时不考虑fifo堵塞的情况
@@ -167,8 +167,40 @@ class Engine(HwModule):
             accumulator,caculate_latency = self._caculate(fifo_list,A_matrix[:,i*4:(i+1)*4],S_bits)
             result_matrix += accumulator[:,0:S_matrix.shape[1]]
             latency += caculate_latency
-            latency += 2 #假设slice latency为1,fifo latency为1
+            latency += 3 #假设slice latency为1,fifo latency为1,更新A需要1
         
+        #yield self.sim.delay(latency)
+
+        return result_matrix,latency
+
+    def execute_right(self,S_matrix,A_matrix,S_bits=5):
+        #右乘
+        #mbar*4 4*n
+        if S_matrix.shape[0] != self.nbar & S_matrix.shape[0] != 8:
+            raise ValueError("S_matrix行数不满足要求")
+        if S_matrix.shape[1] != 4:
+            raise ValueError("S_matrix列数不是4")
+        if A_matrix.shape[0] != S_matrix.shape[1]:
+            raise ValueError("A_matrix行数不等于S_matrix列数")
+        if A_matrix.shape[0] != 4:
+            raise ValueError("A_matrix行数不是4")
+        if S_bits != 5 and S_bits != 2:
+            raise ValueError("S_bits只能是2或5")
+
+        #暂时不考虑fifo堵塞的情况
+        #latency实际上就是caculate_latency+常数
+        latency = 0
+        result_matrix = np.zeros((S_matrix.shape[0],A_matrix.shape[1])).T
+        #print("S_matrix",S_matrix)
+        for i in range(A_matrix.shape[1]//4):
+            #print("S_slice",S_slice)
+            S_slice = self.slice(S_matrix,S_bits)
+            fifo_list = self.fifo(S_slice,S_bits)
+            accumulator,caculate_latency = self._caculate(fifo_list,A_matrix[:,i*4:(i+1)*4].T,S_bits)
+            result_matrix[i*4:(i+1)*4,:]= accumulator[:,0:S_matrix.shape[0]]
+            latency += caculate_latency
+            latency += 3 #假设slice latency为1,fifo latency为1,更新A需要1
+        result_matrix = result_matrix.T
         #yield self.sim.delay(latency)
 
         return result_matrix,latency
