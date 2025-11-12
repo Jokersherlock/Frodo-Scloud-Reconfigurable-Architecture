@@ -240,4 +240,154 @@ class MatrixSlice:
             return np.array([]).reshape(0, 0)
         
         return np.array([row.binary_data for row in self.trans_rows])
+
+
+class ProbabilityDistribution:
+    """
+    概率分布类，用于表示每个数值的概率，并生成满足该分布的矩阵。
+    """
+    
+    def __init__(self, distribution):
+        """
+        初始化概率分布。
+        
+        参数:
+            distribution (dict or list): 
+                概率分布定义。可以是：
+                - 字典: {value: probability} 或 {value: count}（会自动归一化）
+                - 列表: [(value, probability), ...] 或 [(value, count), ...]
+        
+        示例:
+            # 使用字典定义概率
+            dist = ProbabilityDistribution({-1: 0.25, 0: 0.5, 1: 0.25})
+            
+            # 使用字典定义计数（会自动归一化为概率）
+            dist = ProbabilityDistribution({-1: 1, 0: 2, 1: 1})
+            
+            # 使用列表定义
+            dist = ProbabilityDistribution([(-1, 0.25), (0, 0.5), (1, 0.25)])
+        """
+        # 将输入转换为统一的字典格式
+        if isinstance(distribution, dict):
+            self._distribution_dict = distribution.copy()
+        elif isinstance(distribution, list):
+            # 列表格式：[(value, prob), ...]
+            self._distribution_dict = {value: prob for value, prob in distribution}
+        else:
+            raise TypeError(f"distribution 必须是 dict 或 list，但收到了 {type(distribution)}")
+        
+        # 检查是否所有值都是数值
+        if not all(isinstance(k, (int, float, np.integer, np.floating)) 
+                   for k in self._distribution_dict.keys()):
+            raise ValueError("分布的所有键（数值）必须是数字类型")
+        
+        if not all(isinstance(v, (int, float, np.integer, np.floating)) 
+                   for v in self._distribution_dict.values()):
+            raise ValueError("分布的所有值（概率/计数）必须是数字类型")
+        
+        # 归一化概率（如果总和不为1，则归一化）
+        total = sum(self._distribution_dict.values())
+        if total <= 0:
+            raise ValueError("概率/计数的总和必须大于0")
+        
+        if abs(total - 1.0) > 1e-10:  # 如果总和不是1，则归一化
+            self._distribution_dict = {k: v / total for k, v in self._distribution_dict.items()}
+        
+        # 提取数值和对应的概率
+        self.values = np.array(list(self._distribution_dict.keys()))
+        self.probabilities = np.array(list(self._distribution_dict.values()))
+        
+        # 验证概率总和为1（归一化后）
+        prob_sum = np.sum(self.probabilities)
+        if abs(prob_sum - 1.0) > 1e-10:
+            raise ValueError(f"概率归一化后总和应为1，但得到 {prob_sum}")
+    
+    def __repr__(self):
+        """返回概率分布的字符串表示。"""
+        items = sorted(self._distribution_dict.items())
+        items_str = ", ".join(f"{val}: {prob:.4f}" for val, prob in items)
+        return f"ProbabilityDistribution({{{items_str}}})"
+    
+    def __getitem__(self, value):
+        """获取指定数值的概率。"""
+        return self._distribution_dict.get(value, 0.0)
+    
+    def get_values(self):
+        """
+        获取所有可能的数值。
+        
+        返回:
+            np.ndarray: 所有可能的数值数组。
+        """
+        return self.values.copy()
+    
+    def get_probabilities(self):
+        """
+        获取所有数值对应的概率。
+        
+        返回:
+            np.ndarray: 概率数组，与 values 对应。
+        """
+        return self.probabilities.copy()
+    
+    def generate_matrix(self, shape, dtype=None, random_state=None):
+        """
+        生成满足该概率分布的矩阵。
+        
+        参数:
+            shape (tuple or int): 矩阵的形状。如果是整数，则生成一维数组。
+            dtype: 输出数组的数据类型。如果为 None，则根据 values 的类型自动推断。
+            random_state: 随机数生成器的种子或状态。可以是：
+                - None: 使用全局随机数生成器
+                - int: 作为种子创建新的随机数生成器
+                - np.random.Generator: 使用指定的生成器
+        
+        返回:
+            np.ndarray: 满足概率分布的矩阵。
+        
+        示例:
+            dist = ProbabilityDistribution({-1: 0.25, 0: 0.5, 1: 0.25})
+            matrix = dist.generate_matrix((10, 10))  # 生成 10x10 的矩阵
+            matrix = dist.generate_matrix(100)      # 生成长度为 100 的一维数组
+        """
+        # 处理 shape 参数
+        if isinstance(shape, int):
+            shape = (shape,)
+        elif not isinstance(shape, tuple):
+            raise TypeError(f"shape 必须是 int 或 tuple，但收到了 {type(shape)}")
+        
+        # 确定数据类型
+        if dtype is None:
+            # 根据 values 的类型自动推断
+            if np.issubdtype(self.values.dtype, np.integer):
+                dtype = self.values.dtype
+            else:
+                dtype = self.values.dtype
+        
+        # 处理随机数生成器
+        if random_state is None:
+            rng = np.random.default_rng()
+        elif isinstance(random_state, int):
+            rng = np.random.default_rng(random_state)
+        elif isinstance(random_state, np.random.Generator):
+            rng = random_state
+        else:
+            raise TypeError(f"random_state 必须是 None、int 或 np.random.Generator，但收到了 {type(random_state)}")
+        
+        # 计算总元素数
+        total_elements = np.prod(shape)
+        
+        # 使用 numpy 的 choice 函数根据概率分布生成随机数
+        # 注意：numpy.random.choice 需要概率数组，且概率总和必须为1
+        generated_values = rng.choice(
+            self.values,
+            size=total_elements,
+            p=self.probabilities
+        )
+        
+        # 重塑为指定形状
+        matrix = generated_values.reshape(shape).astype(dtype)
+        
+        return matrix
+    
     

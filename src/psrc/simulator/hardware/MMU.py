@@ -10,6 +10,7 @@ class Engine(HwModule):
                     data_simulate_enable = False,
                     accumulator_strategy = "double_registers",
                     bank_ram_latency = 1,
+                    sparse_enable = True,
                     parent: Optional[HwModule] = None):
         super().__init__(name, sim, parent)
         self.data_simulate_enable = data_simulate_enable
@@ -18,6 +19,7 @@ class Engine(HwModule):
 
         self.accumulator_strategy = accumulator_strategy
         self.bank_ram_latency = bank_ram_latency
+        self.sparse_enable = sparse_enable
 
         #self._register_stat("total_cycles_busy",0)
         self._register_stat("total_latency_calculated", 0)
@@ -49,7 +51,10 @@ class Engine(HwModule):
                 raise ValueError("slice矩阵行数不是5的倍数")
             for i in range(matrix_slice.num_rows//5):
                 for j in range(5):
-                    if matrix_slice.trans_rows[i*5+j].popcount != 0:
+                    if self.sparse_enable:
+                        if matrix_slice.trans_rows[i*5+j].popcount != 0:
+                            fifo_list[j].append(matrix_slice.trans_rows[i*5+j])
+                    else:
                         fifo_list[j].append(matrix_slice.trans_rows[i*5+j])
             for i in range(5):
                 fifo_list[i] = MatrixSlice(fifo_list[i])
@@ -60,7 +65,10 @@ class Engine(HwModule):
                 raise ValueError("slice矩阵行数不是2的倍数")
             for i in range(matrix_slice.num_rows//2):
                 for j in range(2):
-                    if matrix_slice.trans_rows[i*2+j].popcount != 0:
+                    if self.sparse_enable:
+                        if matrix_slice.trans_rows[i*2+j].popcount != 0:
+                            fifo_list[i%2+j].append(matrix_slice.trans_rows[i*2+j])
+                    else:
                         fifo_list[i%2+j].append(matrix_slice.trans_rows[i*2+j])
             for i in range(5):
                 fifo_list[i] = MatrixSlice(fifo_list[i])
@@ -226,6 +234,159 @@ class Engine(HwModule):
         self._set_idle()
 
         return result_matrix,latency
+
+    
+class MMU(HwModule):
+    def __init__(self, name: str, sim: Simulator,
+                 n_engines = 4,
+                 data_simulate_enable = True,
+                 accumulator_strategy = "double_registers",
+                 bank_ram_latency = 1,
+                 sparse_enable = True,
+                parent: Optional[HwModule] = None):
+        super().__init__(name, sim, parent)
+        self.n_engines = n_engines
+        self.engines = []
+        for i in range(n_engines):
+            self.engines.append(Engine(name=f"engine_{i}", sim=sim, data_simulate_enable=data_simulate_enable, accumulator_strategy=accumulator_strategy, bank_ram_latency=bank_ram_latency,sparse_enable=sparse_enable,parent=self))
+        
+    def execute_left(self, S_matrix, A_matrix, S_bits=5):
+        #左乘
+        #4*n n*nbar
+        #将n拆成n_engines组分给每个engine，之后再相加
+        #考虑到这是最上层，因此我们不做整除判断，不整除的需要补0,虽然实际中并不会遇到
+        #软件这里分组随便分了
+        if S_matrix.shape[0] != A_matrix.shape[1]:
+            raise ValueError("S_matrix行数不等于A_matrix列数")
+        if A_matrix.shape[0] != 4:
+            raise ValueError("A_matrix行数不是4")
+        if S_bits != 5 and S_bits != 2:
+            raise ValueError("S_bits只能是2或5")
+        if self.busy:
+            raise ValueError("MMU正在繁忙")
+            return None, None
+        self._set_busy()
+
+        n = S_matrix.shape[0]  # S的行数，也是A的列数
+        nbar = S_matrix.shape[1]  # S的列数
+        
+        # 计算每个engine分配的列数（n'）
+        base_n_per_engine = n // self.n_engines
+        remainder = n % self.n_engines
+        
+        # 分配任务给每个engine
+        tasks = []
+        result_matrix = np.zeros((4, nbar))
+        max_latency = 0
+        
+        start_idx = 0
+        for i in range(self.n_engines):
+            # 计算当前engine分配的列数
+            n_per_engine = base_n_per_engine + (1 if i < remainder else 0)
+            end_idx = start_idx + n_per_engine
+            
+            # 提取当前engine的A和S切片
+            A_slice = A_matrix[:, start_idx:end_idx]  # 4 * n'
+            S_slice = S_matrix[start_idx:end_idx, :]  # n' * nbar
+            
+            # 如果n'不是4的倍数，需要补0
+            if n_per_engine % 4 != 0:
+                padding_size = 4 - (n_per_engine % 4)
+                # A补列：4 * (n' + padding)
+                A_slice = np.pad(A_slice, ((0, 0), (0, padding_size)), mode='constant', constant_values=0)
+                # S补行：(n' + padding) * nbar
+                S_slice = np.pad(S_slice, ((0, padding_size), (0, 0)), mode='constant', constant_values=0)
+            
+            # 启动engine任务
+            task = self.sim.spawn(self.engines[i].execute_left, S_slice, A_slice, S_bits)
+            tasks.append(task)
+            
+            start_idx = end_idx
+        
+        # 等待所有任务完成（通过yield等待所有任务）
+        # yield tasks 会返回一个列表，包含所有任务的结果
+        task_results = yield tasks
+        
+        # 收集所有engine的结果并累加
+        for engine_result, engine_latency in task_results:
+            result_matrix += engine_result
+            max_latency = max(max_latency, engine_latency)
+        
+        self._set_idle()
+        return result_matrix, max_latency
+
+    
+    def execute_right(self, S_matrix, A_matrix, S_bits=5):
+        #右乘
+        #mbar*4 4*n
+        #将n拆成n_engines组分给每个engine，之后再相加
+        #考虑到这是最上层，因此我们不做整除判断，不整除的需要补0,虽然实际中并不会遇到
+        #软件这里分组随便分了
+        if S_matrix.shape[1] != A_matrix.shape[0]:
+            raise ValueError("S_matrix列数不等于A_matrix行数")
+        if A_matrix.shape[0] != 4:
+            raise ValueError("A_matrix行数不是4")
+        if S_bits != 5 and S_bits != 2:
+            raise ValueError("S_bits只能是2或5")
+        if self.busy:
+            raise ValueError("MMU正在繁忙")
+            return None,None
+        self._set_busy()
+
+        mbar = S_matrix.shape[0]  # S的行数
+        n = A_matrix.shape[1]  # A的列数
+        
+        # 计算每个engine分配的列数（n'）
+        base_n_per_engine = n // self.n_engines
+        remainder = n % self.n_engines
+        
+        # 分配任务给每个engine
+        tasks = []
+        result_parts = []  # 存储每个engine的结果部分
+        max_latency = 0
+        
+        start_idx = 0
+        for i in range(self.n_engines):
+            # 计算当前engine分配的列数
+            n_per_engine = base_n_per_engine + (1 if i < remainder else 0)
+            end_idx = start_idx + n_per_engine
+            
+            # 提取当前engine的A切片
+            A_slice = A_matrix[:, start_idx:end_idx]  # 4 × n'
+            
+            # 如果n'不是4的倍数，需要补0
+            if n_per_engine % 4 != 0:
+                padding_size = 4 - (n_per_engine % 4)
+                # A补列：4 × (n' + padding)
+                A_slice = np.pad(A_slice, ((0, 0), (0, padding_size)), mode='constant', constant_values=0)
+            
+            # S不需要切分，所有engine共用同一个S
+            # 启动engine任务
+            task = self.sim.spawn(self.engines[i].execute_right, S_matrix, A_slice, S_bits)
+            tasks.append(task)
+            
+            start_idx = end_idx
+        
+        # 等待所有任务完成（通过yield等待所有任务）
+        # yield tasks 会返回一个列表，包含所有任务的结果
+        task_results = yield tasks
+        
+        # 收集所有engine的结果并按列拼接
+        for i, (engine_result, engine_latency) in enumerate(task_results):
+            # 计算当前engine实际应该返回的列数（去除补0的部分）
+            n_per_engine = base_n_per_engine + (1 if i < remainder else 0)
+            # 只取实际列数，去除补0的部分
+            actual_result = engine_result[:, :n_per_engine]
+            result_parts.append(actual_result)
+            max_latency = max(max_latency, engine_latency)
+        
+        # 按列拼接所有结果
+        result_matrix = np.hstack(result_parts)  # mbar × n
+        
+        self._set_idle()
+        return result_matrix, max_latency
+
+
         
     
         
