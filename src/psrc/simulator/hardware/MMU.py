@@ -118,7 +118,7 @@ class Engine(HwModule):
         if S_bits == 5:
             latency = num_rows//5
         elif S_bits == 2:
-            latency = num_rows//2
+            latency = num_rows//4
         else:
             raise ValueError("S_bits只能是2或5")
         
