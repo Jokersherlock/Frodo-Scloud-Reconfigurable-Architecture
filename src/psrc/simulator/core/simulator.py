@@ -197,9 +197,9 @@ class Simulator:
 
     # --- 主循环 (保持不变) ---
     
-    def run(self, until: int | float = float('inf')):
-        print(f"--- 协程仿真在 t={self.current_time} 开始 ---")
-        
+    def run(self, until: int | float = float('inf'),print_progress: bool = True):
+        if print_progress:
+            print(f"--- 协程仿真在 t={self.current_time} 开始 ---")
         while True:
             # 1. 内部Δ-Cycle循环
             while self.ready_queue:
@@ -209,12 +209,14 @@ class Simulator:
             
             # 2. 检查是否结束
             if not self.event_heap:
-                print(f"--- 仿真在 t={self.current_time} 结束 (无更多事件) ---")
+                if print_progress:
+                    print(f"--- 仿真在 t={self.current_time} 结束 (无更多事件) ---")
                 break
                 
             # 3. 检查 'until' 
             if self.event_heap[0].timestamp > until:
-                print(f"--- 仿真在 t={self.current_time} 暂停 (已达到 until={until}) ---")
+                if print_progress:
+                    print(f"--- 仿真在 t={self.current_time} 暂停 (已达到 until={until}) ---")
                 break
                 
             # 4. 弹出【一个】事件，推进时间
