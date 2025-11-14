@@ -108,6 +108,21 @@ class Simulator:
         self.ready_queue: collections.deque = collections.deque()
         self._current_task: Optional[Task] = None
 
+    def reset(self, reset_task_id: bool = False):
+        """
+        重置模拟器到初始状态。
+        
+        参数:
+            reset_task_id: 如果为True，将重置Task的任务ID计数器（默认False）
+        """
+        self.event_heap.clear()
+        self.current_time = 0
+        self.ready_queue.clear()
+        self._current_task = None
+        
+        if reset_task_id:
+            Task._next_task_id = 0
+
     # --- 公共API (供 HwModule 和 Testbench 使用) ---
     
     # ⬇⬇⬇ 【修正：spawn 现在“更智能”】 ⬇⬇⬇

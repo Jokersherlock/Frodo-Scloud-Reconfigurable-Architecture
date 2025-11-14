@@ -406,6 +406,71 @@ class MMU(HwModule):
         self._set_idle()
         return result_matrix, max_latency
 
+    def configure(self, config: dict):
+        """
+        通过字典配置MMU及其内部所有engine的参数。
+        
+        参数:
+            config: 配置字典，可包含以下键：
+                - n_engines: engine数量（如果改变，会重新创建engines）
+                - data_simulate_enable: 数据模拟使能
+                - accumulator_strategy: 累加器策略 ("double_registers", "bank_ram", "no_fifo")
+                - bank_ram_latency: bank RAM延迟
+                - sparse_enable: 稀疏使能
+                - nbar: Engine的nbar参数（默认12）
+                - mbar: Engine的mbar参数（默认12）
+        """
+        # 更新MMU自身的参数
+        if 'n_engines' in config:
+            new_n_engines = config['n_engines']
+            if new_n_engines != self.n_engines:
+                # 如果engine数量改变，需要重新创建engines列表
+                self.n_engines = new_n_engines
+                # 获取当前engine的配置参数（用于新创建的engines）
+                data_simulate_enable = config.get('data_simulate_enable', 
+                                                  self.engines[0].data_simulate_enable if self.engines else True)
+                accumulator_strategy = config.get('accumulator_strategy',
+                                                 self.engines[0].accumulator_strategy if self.engines else "double_registers")
+                bank_ram_latency = config.get('bank_ram_latency',
+                                              self.engines[0].bank_ram_latency if self.engines else 1)
+                sparse_enable = config.get('sparse_enable',
+                                          self.engines[0].sparse_enable if self.engines else True)
+                
+                # 重新创建engines列表
+                self.engines = []
+                for i in range(self.n_engines):
+                    engine = Engine(
+                        name=f"engine_{i}",
+                        sim=self.sim,
+                        data_simulate_enable=data_simulate_enable,
+                        accumulator_strategy=accumulator_strategy,
+                        bank_ram_latency=bank_ram_latency,
+                        sparse_enable=sparse_enable,
+                        parent=self
+                    )
+                    # 如果配置中有nbar或mbar，也设置它们
+                    if 'nbar' in config:
+                        engine.nbar = config['nbar']
+                    if 'mbar' in config:
+                        engine.mbar = config['mbar']
+                    self.engines.append(engine)
+                return  # 如果重新创建了engines，直接返回，因为已经应用了所有配置
+        
+        # 更新现有engines的参数
+        for engine in self.engines:
+            if 'data_simulate_enable' in config:
+                engine.data_simulate_enable = config['data_simulate_enable']
+            if 'accumulator_strategy' in config:
+                engine.accumulator_strategy = config['accumulator_strategy']
+            if 'bank_ram_latency' in config:
+                engine.bank_ram_latency = config['bank_ram_latency']
+            if 'sparse_enable' in config:
+                engine.sparse_enable = config['sparse_enable']
+            if 'nbar' in config:
+                engine.nbar = config['nbar']
+            if 'mbar' in config:
+                engine.mbar = config['mbar']
+
 
         
     
