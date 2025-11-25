@@ -8,17 +8,21 @@ import numpy as np
 class Engine(HwModule):
     def __init__(self, name: str, sim: Simulator,
                     data_simulate_enable = False,
-                    accumulator_strategy = "double_registers",
-                    bank_ram_latency = 1,
                     sparse_enable = True,
+                    n_PEs = 4,
+                    n_lanes = 1,
+                    slice_latency = 1,
+                    buffer_latency = 1,
                     parent: Optional[HwModule] = None):
         super().__init__(name, sim, parent)
         self.data_simulate_enable = data_simulate_enable
+        self.n_PEs = n_PEs
+        self.n_lanes = n_lanes
         self.nbar = 12
         self.mbar = 12
+        self.slice_latency = slice_latency
+        self.buffer_latency = buffer_latency
 
-        self.accumulator_strategy = accumulator_strategy
-        self.bank_ram_latency = bank_ram_latency
         self.sparse_enable = sparse_enable
 
         #self._register_stat("total_cycles_busy",0)
@@ -26,13 +30,6 @@ class Engine(HwModule):
 
     def slice(self,matrix,S_bits=5):
         return MatrixSlice(create_transrow_tasks_from_matrix(matrix,S_bits))
-
-    def _fifo_latency(self,fifo_list):
-        max_latency = 0
-        for fifo in fifo_list:
-            if fifo.num_rows > max_latency:
-                max_latency = fifo.num_rows
-        return max_latency + 1
 
     def fifo(self,matrix_slice,S_bits=5):
         fifo_list = []
@@ -61,22 +58,31 @@ class Engine(HwModule):
                 # print("fifo_",i,fifo_list[i].num_rows)
             return fifo_list
         elif S_bits == 2:
+            #print('matrix_slice.num_rows',matrix_slice.num_rows)
             if matrix_slice.num_rows%2 != 0:
                 raise ValueError("slice矩阵行数不是2的倍数")
-            for i in range(matrix_slice.num_rows//2):
-                for j in range(2):
+            for i in range(matrix_slice.num_rows//4):
+                for j in range(4):
                     if self.sparse_enable:
-                        if matrix_slice.trans_rows[i*2+j].popcount != 0:
-                            fifo_list[i%2+j].append(matrix_slice.trans_rows[i*2+j])
+                        if matrix_slice.trans_rows[i*4+j].popcount != 0:
+                            fifo_list[j].append(matrix_slice.trans_rows[i*4+j])
                     else:
-                        fifo_list[i%2+j].append(matrix_slice.trans_rows[i*2+j])
+                        fifo_list[j].append(matrix_slice.trans_rows[i*4+j])
             for i in range(5):
                 fifo_list[i] = MatrixSlice(fifo_list[i])
             return fifo_list
         else:
             raise ValueError("S_bits只能是2或5")
     
-    def _caculate_latency_double_registers(self,fifo_list,S_bits=5):
+    def _caculate_latency_single_lane(self,fifo_list):
+        latency = 0
+        for i in range(5):
+            latency += fifo_list[i].num_rows
+        # if not self.sparse_enable:
+        #     print('latency',latency)
+        return latency
+    
+    def _caculate_latency_double_lanes(self,fifo_list,S_bits=5):
         #双寄存器结构
         latency = 0
         if S_bits == 5:
@@ -93,26 +99,29 @@ class Engine(HwModule):
                 if row_nums[lane1] > 0:
                     row_nums[lane1] -= 1
                 cnt += 1
-            return latency
         elif S_bits == 2:
             row_nums = [0]*4
             for i in range(4):
                 row_nums[i] = fifo_list[i].num_rows
             cnt = 0
+            #print('row_nums',row_nums)
             while max(row_nums) > 0:
                 latency += 1
                 lane0 = cnt%4
                 lane1 = (cnt+1)%4
+                # print('lane0,lane1',lane0,lane1)
                 if row_nums[lane0] > 0:
                     row_nums[lane0] -= 1
                 if row_nums[lane1] > 0:
                     row_nums[lane1] -= 1
-                cnt += 1
+                cnt += 2
         else:
             raise ValueError("S_bits只能是2或5")
+        # if not self.sparse_enable:
+        #     print('latency',latency)
         return latency
     
-    def _caculate_latency_no_fifo(self,matrix_slice,S_bits=5):
+    def _caculate_latency_five_lanes(self,matrix_slice,S_bits=5):
         #无fifo默认不使用稀疏
         num_rows = matrix_slice.num_rows
         if S_bits == 5:
@@ -122,55 +131,79 @@ class Engine(HwModule):
         else:
             raise ValueError("S_bits只能是2或5")
         
-        latency += 2 #加法树两级延迟
-
+        #latency += 2 #加法树两级延迟
+        # if not self.sparse_enable:
+        #     print('latency',latency)
         return latency
 
 
     def _caculate_latency(self,fifo_list,matrix_slice,S_bits=5):
-        if self.accumulator_strategy == "double_registers":
-            return self._caculate_latency_double_registers(fifo_list,S_bits) + 1 #fifo latency为1
-        elif self.accumulator_strategy == "bank_ram":
-            return self._caculate_latency_double_registers(fifo_list,S_bits) + self.bank_ram_latency + 1 #fifo latency为1
-        elif self.accumulator_strategy == "no_fifo":
-            return self._caculate_latency_no_fifo(matrix_slice,S_bits)
+        if self.n_lanes == 1:
+            return self._caculate_latency_single_lane(fifo_list) + self.slice_latency + self.buffer_latency
+        elif self.n_lanes == 2:
+            return self._caculate_latency_double_lanes(fifo_list,S_bits) + self.slice_latency + self.buffer_latency
+        elif self.n_lanes == 5:
+            return self._caculate_latency_five_lanes(matrix_slice,S_bits) + self.slice_latency
         else:
-            raise ValueError("accumulator_strategy只能是double_registers,bank_ram,no_fifo")
+            raise ValueError("n_lanes只能是1,2,5")
 
-    def _caculate(self,fifo_list,weights_matrix,S_bits=5):
-        #左乘时，4个PE处理4行不同的数据
-        #4*4 4*nbar
-        #右乘只需要软件上将A转置输入(对单个engine)
-        #累加策略只影响latency
-        if weights_matrix.shape[0] != 4:
-            raise ValueError("weights_matrix行数不是4")
+    # def _caculate(self,fifo_list,weights_matrix,S_bits=5):
+    #     #目前默认计算正确，保留原有代码
+    #     if self.n_PEs != weights_matrix.shape[0]:
+    #         raise ValueError("weights_matrix行数不等于n_PEs")
         
-        accumulator = np.zeros((4,self.nbar))
-        if self.data_simulate_enable:
-            for fifo in fifo_list:
-                for row in fifo.trans_rows:
-                    index = row.target_accumulator
-                    for i in range(4):
-                        #4个不同的PE
-                        #print("row.binary_data",row.binary_data)
-                        for j in range(4):
-                            if row.binary_data[j]: # W_binary[s,n,k] == 1
-                                shift_amount = row.shift_amount # bit_level 's'
-                                # 检查是否为 MSB (最高有效位)
-                                is_msb = (shift_amount == (S_bits - 1)) # S_bits=5, MSB=4
-                                # 获取 A_in[i, k] 的值 (假设A_in全为正数，如您所测)
-                                input_val = weights_matrix[i][j]
-                                if is_msb:
-                                    # MSB 对应的部分和必须被减去
-                                    accumulator[i][index] -= (input_val << shift_amount)
-                                else:
-                                    # 其他位对应的部分和是加上
-                                    accumulator[i][index] += (input_val << shift_amount)
-        #latency = self._caculate_latency(fifo_list,S_bits)
-        return accumulator
+    #     accumulator = np.zeros((self.n_PEs,self.nbar))
+    #     if self.data_simulate_enable:
+    #         for fifo in fifo_list:
+    #             for row in fifo.trans_rows:
+    #                 index = row.target_accumulator
+    #                 for i in range(self.n_PEs):
+    #                     for j in range(4):
+    #                         if row.binary_data[j]:
+    #                             shift_amount = row.shift_amount
+    #                             is_msb = (shift_amount == (S_bits - 1))
+    #                             if is_msb:
+    #                                 accumulator[i][index] -= (weights_matrix[i][j] << shift_amount)
+    #                             else:
+    #                                 accumulator[i][index] += (weights_matrix[i][j] << shift_amount)
+        
+    #     #latency = self._caculate_latency(fifo_list,S_bits)
+    #     return accumulator
+
+    # def _caculate(self,fifo_list,weights_matrix,S_bits=5):
+    #     #左乘时，4个PE处理4行不同的数据
+    #     #4*4 4*nbar
+    #     #右乘只需要软件上将A转置输入(对单个engine)
+    #     #累加策略只影响latency
+    #     if weights_matrix.shape[0] != 4:
+    #         raise ValueError("weights_matrix行数不是4")
+        
+    #     accumulator = np.zeros((4,self.nbar))
+    #     if self.data_simulate_enable:
+    #         for fifo in fifo_list:
+    #             for row in fifo.trans_rows:
+    #                 index = row.target_accumulator
+    #                 for i in range(4):
+    #                     #4个不同的PE
+    #                     #print("row.binary_data",row.binary_data)
+    #                     for j in range(4):
+    #                         if row.binary_data[j]: # W_binary[s,n,k] == 1
+    #                             shift_amount = row.shift_amount # bit_level 's'
+    #                             # 检查是否为 MSB (最高有效位)
+    #                             is_msb = (shift_amount == (S_bits - 1)) # S_bits=5, MSB=4
+    #                             # 获取 A_in[i, k] 的值 (假设A_in全为正数，如您所测)
+    #                             input_val = weights_matrix[i][j]
+    #                             if is_msb:
+    #                                 # MSB 对应的部分和必须被减去
+    #                                 accumulator[i][index] -= (input_val << shift_amount)
+    #                             else:
+    #                                 # 其他位对应的部分和是加上
+    #                                 accumulator[i][index] += (input_val << shift_amount)
+    #     #latency = self._caculate_latency(fifo_list,S_bits)
+    #     return accumulator
         
     def execute_left(self,S_matrix,A_matrix,S_bits=5):
-        
+        #默认计算正确
         if self.busy:
             raise ValueError("Engine正在繁忙")
             return None,None
@@ -185,26 +218,28 @@ class Engine(HwModule):
             raise ValueError("S_matrix行数不是4的倍数")
         if A_matrix.shape[1] != S_matrix.shape[0]:
             raise ValueError("A_matrix列数不等于S_matrix行数")
-        if A_matrix.shape[0] != 4:
-            raise ValueError("A_matrix行数不是4")
         if S_bits != 5 and S_bits != 2:
             raise ValueError("S_bits只能是2或5")
+        if self.n_PEs != A_matrix.shape[0]:
+            raise ValueError("A_matrix行数不等于n_PEs")
         
         #暂时不考虑fifo堵塞的情况
         #latency实际上就是caculate_latency+常数
         latency = 0
-        result_matrix = np.zeros((4,S_matrix.shape[1]))
+        result_matrix = np.zeros((self.n_PEs,S_matrix.shape[1]))
         #print("S_matrix",S_matrix)
         for i in range(S_matrix.shape[0]//4):
             S_slice = S_matrix[i*4:(i+1)*4,:].T
             #print("S_slice",S_slice)
             S_slice = self.slice(S_slice,S_bits)
             fifo_list = self.fifo(S_slice,S_bits)
-            accumulator = self._caculate(fifo_list,A_matrix[:,i*4:(i+1)*4],S_bits)
+            #accumulator = self._caculate(fifo_list,A_matrix[:,i*4:(i+1)*4],S_bits)
             caculate_latency = self._caculate_latency(fifo_list,S_slice,S_bits)
-            result_matrix += accumulator[:,0:S_matrix.shape[1]]
+            #result_matrix += accumulator[:,0:S_matrix.shape[1]]
             latency += caculate_latency
-            latency += 2 #假设slice latency为1,更新A需要1
+        
+        if self.data_simulate_enable:
+            result_matrix = np.matmul(A_matrix,S_matrix)
         
         self._increment_stat("total_latency_calculated", latency)
         yield self.sim.delay(latency)
@@ -217,35 +252,32 @@ class Engine(HwModule):
             raise ValueError("Engine正在繁忙")
             return None,None
         self._set_busy()
-
         #右乘
         #mbar*4 4*n
         if S_matrix.shape[0] != self.nbar & S_matrix.shape[0] != 8:
             raise ValueError("S_matrix行数不满足要求")
-        if S_matrix.shape[1] != 4:
-            raise ValueError("S_matrix列数不是4")
         if A_matrix.shape[0] != S_matrix.shape[1]:
             raise ValueError("A_matrix行数不等于S_matrix列数")
-        if A_matrix.shape[0] != 4:
-            raise ValueError("A_matrix行数不是4")
         if S_bits != 5 and S_bits != 2:
             raise ValueError("S_bits只能是2或5")
-
+        if self.n_PEs != A_matrix.shape[0]:
+            raise ValueError("A_matrix行数不等于n_PEs")
         #暂时不考虑fifo堵塞的情况
         #latency实际上就是caculate_latency+常数
         latency = 0
-        result_matrix = np.zeros((S_matrix.shape[0],A_matrix.shape[1])).T
+        result_matrix = np.zeros((S_matrix.shape[0],A_matrix.shape[1]))
         #print("S_matrix",S_matrix)
         for i in range(A_matrix.shape[1]//4):
             #print("S_slice",S_slice)
             S_slice = self.slice(S_matrix,S_bits)
             fifo_list = self.fifo(S_slice,S_bits)
-            accumulator = self._caculate(fifo_list,A_matrix[:,i*4:(i+1)*4].T,S_bits)
+            #accumulator = self._caculate(fifo_list,A_matrix[:,i*4:(i+1)*4].T,S_bits)
             caculate_latency = self._caculate_latency(fifo_list,S_slice,S_bits)
-            result_matrix[i*4:(i+1)*4,:]= accumulator[:,0:S_matrix.shape[0]]
+            #result_matrix[i*4:(i+1)*4,:]= accumulator[:,0:S_matrix.shape[0]]
             latency += caculate_latency
-            latency += 2 #假设slice latency为1,更新A需要1
-        result_matrix = result_matrix.T
+        if self.data_simulate_enable:
+            result_matrix = np.matmul(S_matrix,A_matrix)
+        
         yield self.sim.delay(latency)
        
         self._increment_stat("total_latency_calculated", latency)
@@ -259,16 +291,22 @@ class Engine(HwModule):
 class MMU(HwModule):
     def __init__(self, name: str, sim: Simulator,
                  n_engines = 4,
+                 n_PEs = 4,
+                 n_lanes = 1,
                  data_simulate_enable = True,
-                 accumulator_strategy = "double_registers",
-                 bank_ram_latency = 1,
+                 slice_latency = 1,
+                 buffer_latency = 1,
                  sparse_enable = True,
                 parent: Optional[HwModule] = None):
         super().__init__(name, sim, parent)
         self.n_engines = n_engines
+        self.n_PEs = n_PEs
+        self.n_lanes = n_lanes
+        self.slice_latency = slice_latency
+        self.buffer_latency = buffer_latency
         self.engines = []
         for i in range(n_engines):
-            self.engines.append(Engine(name=f"engine_{i}", sim=sim, data_simulate_enable=data_simulate_enable, accumulator_strategy=accumulator_strategy, bank_ram_latency=bank_ram_latency,sparse_enable=sparse_enable,parent=self))
+            self.engines.append(Engine(name=f"engine_{i}", sim=sim, data_simulate_enable=data_simulate_enable, n_PEs=n_PEs, n_lanes=n_lanes, slice_latency=slice_latency, buffer_latency=buffer_latency,sparse_enable=sparse_enable,parent=self))
         
     def execute_left(self, S_matrix, A_matrix, S_bits=5):
         #左乘
@@ -278,8 +316,8 @@ class MMU(HwModule):
         #软件这里分组随便分了
         if S_matrix.shape[0] != A_matrix.shape[1]:
             raise ValueError("S_matrix行数不等于A_matrix列数")
-        if A_matrix.shape[0] != 4:
-            raise ValueError("A_matrix行数不是4")
+        if A_matrix.shape[0] != self.n_PEs:
+            raise ValueError("A_matrix行数不是n_PEs")
         if S_bits != 5 and S_bits != 2:
             raise ValueError("S_bits只能是2或5")
         if self.busy:
@@ -296,7 +334,7 @@ class MMU(HwModule):
         
         # 分配任务给每个engine
         tasks = []
-        result_matrix = np.zeros((4, nbar))
+        result_matrix = np.zeros((self.n_PEs, nbar))
         max_latency = 0
         
         start_idx = 0
@@ -344,8 +382,8 @@ class MMU(HwModule):
         #软件这里分组随便分了
         if S_matrix.shape[1] != A_matrix.shape[0]:
             raise ValueError("S_matrix列数不等于A_matrix行数")
-        if A_matrix.shape[0] != 4:
-            raise ValueError("A_matrix行数不是4")
+        if A_matrix.shape[0] != self.n_PEs:
+            raise ValueError("A_matrix行数不是n_PEs")
         if S_bits != 5 and S_bits != 2:
             raise ValueError("S_bits只能是2或5")
         if self.busy:
@@ -406,70 +444,70 @@ class MMU(HwModule):
         self._set_idle()
         return result_matrix, max_latency
 
-    def configure(self, config: dict):
-        """
-        通过字典配置MMU及其内部所有engine的参数。
+    # def configure(self, config: dict):
+    #     """
+    #     通过字典配置MMU及其内部所有engine的参数。
         
-        参数:
-            config: 配置字典，可包含以下键：
-                - n_engines: engine数量（如果改变，会重新创建engines）
-                - data_simulate_enable: 数据模拟使能
-                - accumulator_strategy: 累加器策略 ("double_registers", "bank_ram", "no_fifo")
-                - bank_ram_latency: bank RAM延迟
-                - sparse_enable: 稀疏使能
-                - nbar: Engine的nbar参数（默认12）
-                - mbar: Engine的mbar参数（默认12）
-        """
-        # 更新MMU自身的参数
-        if 'n_engines' in config:
-            new_n_engines = config['n_engines']
-            if new_n_engines != self.n_engines:
-                # 如果engine数量改变，需要重新创建engines列表
-                self.n_engines = new_n_engines
-                # 获取当前engine的配置参数（用于新创建的engines）
-                data_simulate_enable = config.get('data_simulate_enable', 
-                                                  self.engines[0].data_simulate_enable if self.engines else True)
-                accumulator_strategy = config.get('accumulator_strategy',
-                                                 self.engines[0].accumulator_strategy if self.engines else "double_registers")
-                bank_ram_latency = config.get('bank_ram_latency',
-                                              self.engines[0].bank_ram_latency if self.engines else 1)
-                sparse_enable = config.get('sparse_enable',
-                                          self.engines[0].sparse_enable if self.engines else True)
+    #     参数:
+    #         config: 配置字典，可包含以下键：
+    #             - n_engines: engine数量（如果改变，会重新创建engines）
+    #             - data_simulate_enable: 数据模拟使能
+    #             - accumulator_strategy: 累加器策略 ("double_registers", "bank_ram", "no_fifo")
+    #             - bank_ram_latency: bank RAM延迟
+    #             - sparse_enable: 稀疏使能
+    #             - nbar: Engine的nbar参数（默认12）
+    #             - mbar: Engine的mbar参数（默认12）
+    #     """
+    #     # 更新MMU自身的参数
+    #     if 'n_engines' in config:
+    #         new_n_engines = config['n_engines']
+    #         if new_n_engines != self.n_engines:
+    #             # 如果engine数量改变，需要重新创建engines列表
+    #             self.n_engines = new_n_engines
+    #             # 获取当前engine的配置参数（用于新创建的engines）
+    #             data_simulate_enable = config.get('data_simulate_enable', 
+    #                                               self.engines[0].data_simulate_enable if self.engines else True)
+    #             accumulator_strategy = config.get('accumulator_strategy',
+    #                                              self.engines[0].accumulator_strategy if self.engines else "double_registers")
+    #             bank_ram_latency = config.get('bank_ram_latency',
+    #                                           self.engines[0].bank_ram_latency if self.engines else 1)
+    #             sparse_enable = config.get('sparse_enable',
+    #                                       self.engines[0].sparse_enable if self.engines else True)
                 
-                # 重新创建engines列表
-                self.engines = []
-                for i in range(self.n_engines):
-                    engine = Engine(
-                        name=f"engine_{i}",
-                        sim=self.sim,
-                        data_simulate_enable=data_simulate_enable,
-                        accumulator_strategy=accumulator_strategy,
-                        bank_ram_latency=bank_ram_latency,
-                        sparse_enable=sparse_enable,
-                        parent=self
-                    )
-                    # 如果配置中有nbar或mbar，也设置它们
-                    if 'nbar' in config:
-                        engine.nbar = config['nbar']
-                    if 'mbar' in config:
-                        engine.mbar = config['mbar']
-                    self.engines.append(engine)
-                return  # 如果重新创建了engines，直接返回，因为已经应用了所有配置
+    #             # 重新创建engines列表
+    #             self.engines = []
+    #             for i in range(self.n_engines):
+    #                 engine = Engine(
+    #                     name=f"engine_{i}",
+    #                     sim=self.sim,
+    #                     data_simulate_enable=data_simulate_enable,
+    #                     accumulator_strategy=accumulator_strategy,
+    #                     bank_ram_latency=bank_ram_latency,
+    #                     sparse_enable=sparse_enable,
+    #                     parent=self
+    #                 )
+    #                 # 如果配置中有nbar或mbar，也设置它们
+    #                 if 'nbar' in config:
+    #                     engine.nbar = config['nbar']
+    #                 if 'mbar' in config:
+    #                     engine.mbar = config['mbar']
+    #                 self.engines.append(engine)
+    #             return  # 如果重新创建了engines，直接返回，因为已经应用了所有配置
         
-        # 更新现有engines的参数
-        for engine in self.engines:
-            if 'data_simulate_enable' in config:
-                engine.data_simulate_enable = config['data_simulate_enable']
-            if 'accumulator_strategy' in config:
-                engine.accumulator_strategy = config['accumulator_strategy']
-            if 'bank_ram_latency' in config:
-                engine.bank_ram_latency = config['bank_ram_latency']
-            if 'sparse_enable' in config:
-                engine.sparse_enable = config['sparse_enable']
-            if 'nbar' in config:
-                engine.nbar = config['nbar']
-            if 'mbar' in config:
-                engine.mbar = config['mbar']
+    #     # 更新现有engines的参数
+    #     for engine in self.engines:
+    #         if 'data_simulate_enable' in config:
+    #             engine.data_simulate_enable = config['data_simulate_enable']
+    #         if 'accumulator_strategy' in config:
+    #             engine.accumulator_strategy = config['accumulator_strategy']
+    #         if 'bank_ram_latency' in config:
+    #             engine.bank_ram_latency = config['bank_ram_latency']
+    #         if 'sparse_enable' in config:
+    #             engine.sparse_enable = config['sparse_enable']
+    #         if 'nbar' in config:
+    #             engine.nbar = config['nbar']
+    #         if 'mbar' in config:
+    #             engine.mbar = config['mbar']
 
 
         
