@@ -1,0 +1,20 @@
+# Vivado 项目文件夹
+prj/
+
+# Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 编译和构建文件
+*.log
+*.jou
+*.pb
+*.wdb
+*.wcfg
+
+# 临时文件
+*.tmp
+*.bak
+*~
+
