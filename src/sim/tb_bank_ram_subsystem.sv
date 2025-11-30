@@ -215,49 +215,47 @@ module tb_bank_ram_subsystem;
 
         // --- Step 2: Slot 0 基本读写测试 ---
         $display("\n=== Test 1: Slot 0 Basic RW ===");
-        master_write(1, 5'b11111, 9'd10, 32'hAAAA_0000);
-        #100
-        dump_trigger = 1;
-        master_read_check(1, 5'b11111, 9'd10, 32'hAAAA_0000);
+        master_write(0, 5'b11111, 9'd10, 32'hAAAA_0000);
+        master_read_check(0, 5'b11111, 9'd10, 32'hAAAA_0000);
 
-        // // --- Step 3: Slot 1 测试 (优先级低) ---
-        // $display("\n=== Test 2: Slot 1 Basic RW ===");
-        // master_write(1, 5'b00001, 9'd50, 32'hCCCC_0000);
-        // master_read_check(1, 5'b00001, 9'd50, 32'hCCCC_0000);
+        // --- Step 3: Slot 1 测试 (优先级低) ---
+        $display("\n=== Test 2: Slot 1 Basic RW ===");
+        master_write(1, 5'b00001, 9'd50, 32'hCCCC_0000);
+        master_read_check(1, 5'b00001, 9'd50, 32'hCCCC_0000);
 
-        // // --- Step 4: 并发仲裁测试 ---
-        // $display("\n=== Test 3: Arbitration ===");
+        // --- Step 4: 并发仲裁测试 ---
+        $display("\n=== Test 3: Arbitration ===");
         
-        // @(negedge clk);
-        // // Slot 0 请求
-        // v_cmd_if[0].valid = 1; v_cmd_if[0].rw = 1; v_cmd_if[0].addr = 100; v_cmd_if[0].mask = 5'h1F;
-        // v_data_if[0].wvalid = 1; v_data_if[0].wdata = {5{32'h1111_1111}};
+        @(negedge clk);
+        // Slot 0 请求
+        v_cmd_if[0].valid = 1; v_cmd_if[0].rw = 1; v_cmd_if[0].addr = 100; v_cmd_if[0].mask = 5'h1F;
+        v_data_if[0].wvalid = 1; v_data_if[0].wdata = {5{32'h1111_1111}};
 
-        // // Slot 1 请求
-        // v_cmd_if[1].valid = 1; v_cmd_if[1].rw = 1; v_cmd_if[1].addr = 200; v_cmd_if[1].mask = 5'h1F;
-        // v_data_if[1].wvalid = 1; v_data_if[1].wdata = {5{32'h2222_2222}};
+        // Slot 1 请求
+        v_cmd_if[1].valid = 1; v_cmd_if[1].rw = 1; v_cmd_if[1].addr = 200; v_cmd_if[1].mask = 5'h1F;
+        v_data_if[1].wvalid = 1; v_data_if[1].wdata = {5{32'h2222_2222}};
 
-        // // 检查仲裁结果 (下一拍 Ready 应该只给 Slot 0)
-        // @(posedge clk); #1;
-        // if (v_cmd_if[0].ready && !v_cmd_if[1].ready) 
-        //     $display("SUCCESS: Slot 0 won arbitration.");
-        // else 
-        //     $error("FAIL: Arbitration error. Ready0=%b, Ready1=%b", v_cmd_if[0].ready, v_cmd_if[1].ready);
+        // 检查仲裁结果 (下一拍 Ready 应该只给 Slot 0)
+        @(posedge clk); #1;
+        if (v_cmd_if[0].ready && !v_cmd_if[1].ready) 
+            $display("SUCCESS: Slot 0 won arbitration.");
+        else 
+            $error("FAIL: Arbitration error. Ready0=%b, Ready1=%b", v_cmd_if[0].ready, v_cmd_if[1].ready);
 
-        // // 撤销 Slot 0
-        // @(negedge clk);
-        // v_cmd_if[0].valid = 0; v_data_if[0].wvalid = 0;
+        // 撤销 Slot 0
+        @(negedge clk);
+        v_cmd_if[0].valid = 0; v_data_if[0].wvalid = 0;
 
-        // // 检查 Slot 1 是否接管
-        // @(posedge clk); #1;
-        // if (v_cmd_if[1].ready) 
-        //     $display("SUCCESS: Slot 1 granted access.");
-        // else 
-        //     $error("FAIL: Slot 1 not granted access.");
+        // 检查 Slot 1 是否接管     
+        @(posedge clk); #1;
+        if (v_cmd_if[1].ready) 
+            $display("SUCCESS: Slot 1 granted access.");
+        else 
+            $error("FAIL: Slot 1 not granted access.");
 
-        // // 撤销 Slot 1
-        // @(negedge clk);
-        // v_cmd_if[1].valid = 0; v_data_if[1].wvalid = 0;
+        // 撤销 Slot 1
+        @(negedge clk);
+        v_cmd_if[1].valid = 0; v_data_if[1].wvalid = 0;
 
         #100;
         $display("\n=== All Tests Finished ===");
