@@ -19,7 +19,7 @@ module bank_ram (
         for (i = 0; i < NUM_BANKS; i++) begin : gen_bank
             `ifdef USE_IP
                 // 使用IP核
-                bank_ram u_bank_ram (
+                bank_ram_ip u_bank_ram (
                     .clka(clk),
                     .ena(ports[i].en),
                     .wea(ports[i].we),
@@ -31,6 +31,7 @@ module bank_ram (
                 // 使用RTL实现
                 // 连接控制信号
                 assign int_ram_if[i].en = ports[i].en;
+                // assign int_ram_if[i].en = 1'b1;
                 assign int_ram_if[i].we = ports[i].we;
                 assign int_ram_if[i].addr = ports[i].addr;
                 assign int_ram_if[i].wdata = ports[i].wdata;
