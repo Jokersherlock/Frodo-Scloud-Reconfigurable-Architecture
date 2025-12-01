@@ -1,6 +1,6 @@
 module accumulator #(
-    parameter ADDR_WIDTH = 10,
-    parameter DATA_WIDTH = 32
+    parameter ADDR_WIDTH = 9,
+    parameter DATA_WIDTH = 64
 )(
     input  logic                    clk,
     input  logic                    rstn,

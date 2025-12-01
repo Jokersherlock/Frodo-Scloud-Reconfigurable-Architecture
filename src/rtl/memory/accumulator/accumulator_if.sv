@@ -1,49 +1,67 @@
-interface Accum_Cmd_If (input logic clk, input logic rstn);
-    // ================= 配置参数 =================
-    localparam NUM_BANKS  = 4;  // 16路并行
-    localparam ADDR_WIDTH = 9;   // 深度 512
+interface Accum_Cmd_If #(
+    parameter NUM_BANKS  = 4,
+    parameter ADDR_WIDTH = 9,
+    parameter ZONE_WIDTH = 2
+) (
+    input logic clk, 
+    input logic rstn
+);
 
-    // ================= 信号定义 =================
-    logic                   valid;      // 命令有效
-    logic                   ready;      // Slave 是否准备好接收命令
-    
-    // --- 核心控制信号 ---
-    logic                   rw;         // 0: Read, 1: Write
-    logic                   accum_en;   // **关键**: 0=Overwrite, 1=Accumulate (仅在 rw=1 时有效)
-    
-    // --- 寻址与掩码 ---
-    logic [NUM_BANKS-1:0]   mask;       // 16位掩码，决定操作哪些 Bank
-    logic [ADDR_WIDTH-1:0] addr; // 16路地址
+    // =======================================================
+    // 通道 1: 写命令通道 (Write Command Channel) -> 对应 RAM Port A
+    // =======================================================
+    logic                   wr_valid;
+    logic                   wr_ready;
+    logic [ZONE_WIDTH-1:0]  wr_zone_id; // 写路由 ID
+    logic                   accum_en;   // 0:Overwrite, 1:Accumulate
+    logic [NUM_BANKS-1:0]   wr_mask;    // 写掩码
+    logic [ADDR_WIDTH-1:0]  wr_addr;    // 写地址
 
-    // ================= Modport =================
+    // =======================================================
+    // 通道 2: 读命令通道 (Read Command Channel) -> 对应 RAM Port B
+    // =======================================================
+    logic                   rd_valid;
+    logic                   rd_ready;
+    logic [ZONE_WIDTH-1:0]  rd_zone_id; // 读路由 ID
+    logic [NUM_BANKS-1:0]   rd_mask;    // 读掩码 (决定读哪些 Bank)
+    logic [ADDR_WIDTH-1:0]  rd_addr;    // 读地址
+
+    // ================= Modports =================
     modport Master (
-        input  clk, rstn, ready,
-        output valid, rw, accum_en, mask, addr
+        input  clk, rstn, 
+        input  wr_ready, rd_ready,
+        output wr_valid, wr_zone_id, accum_en, wr_mask, wr_addr,
+        output rd_valid, rd_zone_id, rd_mask, rd_addr
     );
 
     modport Slave (
-        input  clk, rstn, valid, rw, accum_en, mask, addr,
-        output ready
+        input  clk, rstn,
+        input  wr_valid, wr_zone_id, accum_en, wr_mask, wr_addr,
+        input  rd_valid, rd_zone_id, rd_mask, rd_addr,
+        output wr_ready, rd_ready
     );
+
 endinterface
 
-interface Accum_Data_If (input logic clk, input logic rstn);
-    // ================= 配置参数 =================
-    localparam NUM_BANKS  = 4;
-    localparam DATA_WIDTH = 64;  // **关键**: 64-bit 宽数据
+interface Accum_Data_If #(
+    parameter NUM_BANKS  = 4,
+    parameter DATA_WIDTH = 64
+) (
+    input logic clk, 
+    input logic rstn
+);
 
-    // ================= 写通道 (Master -> Slave) =================
-    logic                   wvalid;
-    logic                   wready;
-    logic [NUM_BANKS-1:0][DATA_WIDTH-1:0] wdata; // 这里的 wdata 是“增量”或者“新值”
+    // ================= 写数据通道 (配合 Write Command) =================
+    logic                                   wvalid;
+    logic                                   wready;
+    logic [NUM_BANKS-1:0][DATA_WIDTH-1:0]   wdata;
 
-    // ================= 读通道 (Slave -> Master) =================
-    // 注意：即使是 Accumulate 操作，通常也不需要立刻读回结果。
-    // 读通道主要用于计算完成后，将最终结果搬运回 CPU 或后处理模块。
-    logic                   rvalid;
-    logic [NUM_BANKS-1:0][DATA_WIDTH-1:0] rdata;
+    // ================= 读数据通道 (配合 Read Command) =================
+    logic                                   rvalid;
+    // 读数据不需要 ready，Master 必须无条件接收
+    logic [NUM_BANKS-1:0][DATA_WIDTH-1:0]   rdata;
 
-    // ================= Modport =================
+    // ================= Modports =================
     modport Master (
         input  clk, rstn, wready, rvalid, rdata,
         output wvalid, wdata
@@ -53,4 +71,5 @@ interface Accum_Data_If (input logic clk, input logic rstn);
         input  clk, rstn, wvalid, wdata,
         output wready, rvalid, rdata
     );
+
 endinterface
