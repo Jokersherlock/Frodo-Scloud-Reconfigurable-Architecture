@@ -14,6 +14,12 @@ module pseudo_dpram (
     // 定义存储阵列
     logic [DW-1:0] mem [0:DEPTH-1];
 
+    initial begin
+        for (int i = 0; i < DEPTH; i++) begin
+            mem[i] = '0; // '0 会自动根据位宽填满0
+        end
+    end
+
     // ---------------------------
     // 写逻辑 (Port A)
     // ---------------------------
@@ -34,5 +40,25 @@ module pseudo_dpram (
             rd_port.rdata <= mem[rd_port.addr]; 
         end
     end
+
+    `ifdef PRINT_RAM
+        initial begin
+            int fd;
+            string filename;
+            forever begin
+                wait($root.tb_accumulator.dump_trigger == 1);
+            end
+            $sformat(filename, "../../../../../../temp/accumulator_data/%m.txt");
+            fd = $fopen(filename, "w");
+            if (fd) begin
+                $display("[%0t] Dumping memory content to %s ...", $time, filename);
+                $writememh(filename, mem);
+                $fclose(fd);
+            end else begin
+                $error("Failed to open file %s", filename);
+            end
+            wait($root.tb_accumulator.dump_trigger == 0);
+        end
+    `endif
 
 endmodule

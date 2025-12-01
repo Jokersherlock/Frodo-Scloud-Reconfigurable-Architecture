@@ -10,6 +10,7 @@ module tb_accumulator;
 
     logic clk, rstn;
     logic mode;
+    logic dump_trigger = 0;
 
     // 实例化接口 (TB 作为 Master 驱动这些接口)
     ram_if #(ADDR_WIDTH, DATA_WIDTH) ext_wr_if(clk);
@@ -180,6 +181,82 @@ module tb_accumulator;
         check_result(10'h10, 165);
         check_result(10'h20, 220);
 
+// --------------------------------------------------------
+        // TEST 5: 覆盖模式下的“读写并发”测试
+        // --------------------------------------------------------
+        $display("\n--- Test 5: Simultaneous Read & Write (Overwrite Mode) ---");
+        
+        // 场景设定：
+        // 1. 写: 向新地址 0x80 写入 0xDEAD_BEEF (Mode 0)
+        // 2. 读: 同时读取地址 0x10 (预期值 165，来自 Test 4)
+        
+        @(posedge clk);
+        // --- 同时驱动读和写接口 ---
+        
+        // A. 驱动写 (Port A via Pipeline)
+        mode            <= 0; // 关键：必须是覆盖模式
+        ext_wr_if.en    <= 1;
+        ext_wr_if.we    <= 1;
+        ext_wr_if.addr  <= 10'h80;
+        ext_wr_if.wdata <= 32'hDEAD_BEEF;
+
+        // B. 驱动读 (Port B Direct)
+        ext_rd_if.en    <= 1;
+        ext_rd_if.addr  <= 10'h10;
+
+        // --- 下一拍：撤销信号并检查读结果 ---
+        @(posedge clk);
+        ext_wr_if.en    <= 0; 
+        ext_wr_if.we    <= 0;
+        ext_rd_if.en    <= 0;
+
+        // RAM Latency = 1，所以在 T1 (现在) 数据已经出现在 rdata 上
+        #1; // 延时采样
+        if (ext_rd_if.rdata !== 32'd165) begin
+            $error("[FAIL] Simultaneous Read: Addr 0x10, Exp 165, Got %0d", ext_rd_if.rdata);
+        end else begin
+            $display("[PASS] Simultaneous Read: Data 165 retrieved successfully while writing.");
+        end
+
+        // --- 再过几拍：检查刚才的写是否成功 ---
+        // 写操作在流水线中需要时间 (T0进 -> T2写)
+        repeat(5) @(posedge clk);
+        
+        // 读取 0x80 检查写入
+        check_result(10'h80, 32'hDEAD_BEEF);
+
+// --------------------------------------------------------
+        // TEST 6: 累加干扰测试 (Accumulate Robustness)
+        // --------------------------------------------------------
+        $display("\n--- Test 6: Accumulate Robustness (Ignore Read Conflict) ---");
+        
+        // 场景：
+        // 1. 地址 0x10 当前值是 165 (来自 Test 4)
+        // 2. 发起累加：地址 0x10, 加 10 -> 结果应为 175
+        // 3. 同时发起干扰读：地址 0x00 (随便一个地址)
+        
+        @(posedge clk);
+        // 驱动累加 (Priority High)
+        mode            <= 1; 
+        ext_wr_if.en    <= 1; ext_wr_if.we <= 1;
+        ext_wr_if.addr  <= 10'h10; 
+        ext_wr_if.wdata <= 32'd10;
+
+        // 驱动干扰读 (Priority Low)
+        ext_rd_if.en    <= 1;
+        ext_rd_if.addr  <= 10'h00; // 这是一个完全不同的地址
+
+        @(posedge clk);
+        ext_wr_if.en <= 0; ext_wr_if.we <= 0;
+        ext_rd_if.en <= 0;
+
+        // 等待写回完成
+        repeat(5) @(posedge clk);
+
+        // 验证累加结果是否正确 (是否被干扰)
+        // 如果变成了未知数，说明读到了 0x00 的数据去累加，那就挂了
+        // 如果是 175，说明读到了 0x10 的旧值，成功抗干扰
+        check_result(10'h10, 175);
         $display("\n=== All Tests Finished ===");
         $finish;
     end
