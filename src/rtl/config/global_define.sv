@@ -2,4 +2,4 @@
 
 `define USE_IP
 
-`define PRINT_RAM
+// `define PRINT_RAM
