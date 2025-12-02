@@ -10,42 +10,46 @@ module Accum_Wrapper #(
     Accum_Cmd_If.Slave   bus_cmd_if,
     Accum_Data_If.Slave  bus_data_if,
     
-    // 2. 输出接口：连接到 Accum_Group (Master view, Driving RAM IFs)
-    //    这里输出的信号就是 Accum_Group 模块的输入 (wr_ports/rd_ports)
-    output ram_if.master wr_ports [NUM_BANKS-1:0],
-    output ram_if.master rd_ports [NUM_BANKS-1:0],
+    // 2. 输出接口：连接到 Accum_Group
+    // 【语法修正】：去掉 'output' 关键字，直接声明 Interface 数组
+    ram_if.master        wr_ports [NUM_BANKS-1:0],
+    ram_if.master        rd_ports [NUM_BANKS-1:0],
     
     // 3. 模式信号 (广播给 Group)
-    output logic mode // 对应 Accum_Cmd_If.accum_en
+    // 这个是普通信号，需要保留 output
+    output logic         mode 
 );
 
     // ============================================================
     // 内部控制与时序
     // ============================================================
     
-    // 读数据有效信号的延迟寄存器 (Latency = 1)
-    logic rvalid_reg;
-    
     // Accumulate Mode 信号广播
     assign mode = bus_cmd_if.accum_en;
     
-    // 握手信号：假设流水线能全速吞吐
+    // 握手信号：始终 Ready (流水线全速吞吐)
     assign bus_cmd_if.wr_ready = 1'b1;
     assign bus_cmd_if.rd_ready = 1'b1;
     assign bus_data_if.wready  = 1'b1;
 
-    // RVALID 生成逻辑 (1 Cycle Latency)
+    // ============================================================
+    // RVALID 生成逻辑 (修正为 Latency = 2)
+    // ============================================================
+    // 既然 RAM Latency = 2，rvalid 必须延迟 2 拍才能与 rdata 对齐
+    logic [1:0] rvalid_pipe;
+
     always_ff @(posedge clk or negedge rstn) begin
         if (!rstn) begin
-            rvalid_reg <= 1'b0;
+            rvalid_pipe <= 2'b00;
         end else begin
-            // rvalid 应该在读请求的下一拍生效
-            rvalid_reg <= bus_cmd_if.rd_valid;
+            // 移位寄存器：0 -> 1 -> out
+            // bus_cmd_if.rd_valid (T0) -> pipe[0] (T1) -> pipe[1] (T2)
+            rvalid_pipe <= {rvalid_pipe[0], bus_cmd_if.rd_valid};
         end
     end
 
-    // Final rvalid output to the bus
-    assign bus_data_if.rvalid = rvalid_reg;
+    // 输出最高位 (T2 时刻有效)
+    assign bus_data_if.rvalid = rvalid_pipe[1];
 
 
     // ============================================================
@@ -64,13 +68,13 @@ module Accum_Wrapper #(
                 wr_ports[i].en    = 1'b0;
                 wr_ports[i].we    = 1'b0;
                 
-                // 地址广播：所有 Unit 接收相同的写地址
+                // 地址广播
                 wr_ports[i].addr  = bus_cmd_if.wr_addr;
                 
-                // 数据切片：只把 wdata 的第 i 段送给第 i 个 Unit
+                // 数据切片：Bus 256-bit -> Unit 64-bit
                 wr_ports[i].wdata = bus_data_if.wdata[i];
                 
-                // 触发逻辑：必须是 Write Valid AND Data Valid AND Mask 命中
+                // 触发逻辑：Write Valid + Data Valid + Mask Hit
                 if (bus_cmd_if.wr_valid && bus_data_if.wvalid && bus_cmd_if.wr_mask[i]) begin
                     wr_ports[i].en = 1'b1;
                     wr_ports[i].we = 1'b1; 
@@ -82,11 +86,13 @@ module Accum_Wrapper #(
             // ----------------------------------------------------
             always_comb begin
                 rd_ports[i].en    = 1'b0;
-                rd_ports[i].we    = 1'b0; // 读端口永远不写
+                rd_ports[i].we    = 1'b0; 
                 rd_ports[i].wdata = '0;
-                rd_ports[i].addr  = bus_cmd_if.rd_addr; // 地址广播
+                
+                // 地址广播
+                rd_ports[i].addr  = bus_cmd_if.rd_addr;
 
-                // 触发逻辑：Read Valid AND Mask 命中
+                // 触发逻辑：Read Valid + Mask Hit
                 if (bus_cmd_if.rd_valid && bus_cmd_if.rd_mask[i]) begin
                     rd_ports[i].en = 1'b1;
                 end
@@ -96,6 +102,7 @@ module Accum_Wrapper #(
             // C. 读数据回收 (Collect RData)
             // ----------------------------------------------------
             // 从 Unit Read Port 接收数据，并合并回 Bus Data Interface
+            // 此时 rdata 已经是经过 Accumulator 内部直连出来的 (Latency 2)
             assign bus_data_if.rdata[i] = rd_ports[i].rdata;
 
         end

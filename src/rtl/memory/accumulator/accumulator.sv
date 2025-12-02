@@ -9,7 +9,7 @@ module accumulator #(
     input  logic mode
 );
 
-    // 内部接口实例化 & RAM 实例化 (保持不变)
+    // 内部接口实例化 & RAM 实例化
     ram_if #(ADDR_WIDTH, DATA_WIDTH) int_wr_if (clk);
     ram_if #(ADDR_WIDTH, DATA_WIDTH) int_rd_if (clk);
     
@@ -66,7 +66,7 @@ module accumulator #(
             history[0] <= '0;
             history[1] <= '0;
         end else begin
-            // 1. 流水线移位 (收缩回 3 级)
+            // 1. 流水线移位
             pipe[0].valid <= wr_port.en && wr_port.we;
             pipe[0].mode  <= mode;
             pipe[0].addr  <= wr_port.addr;
@@ -75,21 +75,21 @@ module accumulator #(
             pipe[1] <= pipe[0];
             pipe[2] <= pipe[1]; 
 
-            // 2. 写命令锁存 (Stage 2 Register)
+            // 2. 写命令锁存
             wr_cmd_reg <= pipe[2]; 
 
-            // 3. 更新旁路历史 (在 pipe[2] 处写回)
-            history[1] <= history[0]; // T-2 <= T-1 (History 移位)
+            // 3. 更新旁路历史
+            history[1] <= history[0]; 
 
-            if (pipe[2].valid) begin // P2 是最终 ALU 级
+            if (pipe[2].valid) begin 
                 history[0].valid <= 1'b1;
                 history[0].addr  <= pipe[2].addr;
                 history[0].data  <= alu_result_reg; 
             end else begin
-                history[0].valid <= 1'b0; // 清楚有效位
+                history[0].valid <= 1'b0;
             end
             
-            // 4. ALU 结果锁存 (Stage 2 寄存器)
+            // 4. ALU 结果锁存
             alu_result_reg <= final_wdata;
         end
     end
@@ -100,19 +100,16 @@ module accumulator #(
 
     // --- STAGE 0: 读请求分发 ---
     always_comb begin
-        // 默认透传外部读
-        int_rd_if.en  = rd_port.en;
+        int_rd_if.en   = rd_port.en;
         int_rd_if.addr = rd_port.addr;
-        rd_port.rdata = int_rd_if.rdata; 
+        rd_port.rdata  = int_rd_if.rdata; 
 
-        // 累加器内部读优先 (修正为组合发射)
         if (wr_port.en && wr_port.we && mode == 1'b1) begin 
-            int_rd_if.en  = 1'b1;
-            int_rd_if.addr = wr_port.addr; // 使用外部输入的地址 (T0 地址)
+            int_rd_if.en   = 1'b1;
+            int_rd_if.addr = wr_port.addr; 
         end
-        // 外部读透传逻辑
         else if (pipe[0].valid && pipe[0].mode == 1'b1) begin
-            int_rd_if.en  = 1'b1;
+            int_rd_if.en   = 1'b1;
             int_rd_if.addr = pipe[0].addr;
         end
     end
@@ -121,30 +118,32 @@ module accumulator #(
     always_comb begin
         // 1. 旁路选择逻辑 (Forwarding Mux)
         if (pipe[2].mode == 1'b1) begin
-            
-            // 检查历史记录 (只检查 T-1, T-2)
             if (history[0].valid && (history[0].addr == pipe[2].addr)) begin
-                base_data = history[0].data; // 命中 T-1 结果
+                base_data = history[0].data; 
             end else if (history[1].valid && (history[1].addr == pipe[2].addr)) begin
-                base_data = history[1].data; // 命中 T-2 结果
-            end else begin // 【关键语法修正点】: 去掉前面的 '}'
-                // 无冲突：使用 RAM 的输出线 (Lat=2 数据)
+                base_data = history[1].data; 
+            end else begin
                 base_data = int_rd_if.rdata; 
             end
         end else begin
             base_data = '0;
         end
 
-        // 2. ALU 计算
-        if (pipe[2].mode == 1'b0)
-            final_wdata = pipe[2].wdata;
-        else
-            final_wdata = base_data + pipe[2].wdata; // 累加
+        // 2. ALU 计算 (【关键修正】：SIMD 加法)
+        if (pipe[2].mode == 1'b0) begin
+            final_wdata = pipe[2].wdata; // 覆盖模式
+        end else begin
+            // 累加模式：按 16-bit 切片独立相加，防止进位传播
+            // 假设 DATA_WIDTH (64) 是 16 的倍数
+            for (int i = 0; i < DATA_WIDTH/16; i++) begin
+                final_wdata[i*16 +: 16] = base_data[i*16 +: 16] + pipe[2].wdata[i*16 +: 16];
+            end
+        end
 
         // 3. 驱动写端口 (Port A)
-        int_wr_if.en = wr_cmd_reg.valid;
-        int_wr_if.we = wr_cmd_reg.valid;
-        int_wr_if.addr = wr_cmd_reg.addr;
-        int_wr_if.wdata = alu_result_reg; // 写入 T3 锁存后的结果
+        int_wr_if.en    = wr_cmd_reg.valid;
+        int_wr_if.we    = wr_cmd_reg.valid;
+        int_wr_if.addr  = wr_cmd_reg.addr;
+        int_wr_if.wdata = alu_result_reg; 
     end
 endmodule
