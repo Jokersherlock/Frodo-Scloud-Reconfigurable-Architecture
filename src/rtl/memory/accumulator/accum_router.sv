@@ -1,7 +1,7 @@
 module Accum_Router #(
     parameter NUM_ZONES  = 4,
     parameter ZONE_WIDTH = 2,
-    // 辅助参数，用于计算数据位宽
+    // 辅助参数
     parameter NUM_BANKS  = 4,
     parameter DATA_WIDTH = 64
 )(
@@ -18,90 +18,156 @@ module Accum_Router #(
 );
 
     // =================================================================
-    // 1. 定义中间信号数组 (用于反向路径解包)
-    //    这是为了让我们可以用 s_cmd.wr_zone_id 来动态索引它们
+    // 1. Payload 定义 (将所有前向信号打包，用于过 Buffer)
     // =================================================================
-    logic [NUM_ZONES-1:0] zone_wr_ready_vec;
-    logic [NUM_ZONES-1:0] zone_rd_ready_vec;
-    logic [NUM_ZONES-1:0] zone_wdata_ready_vec;
     
+    // 写通道 Payload (包含 Command 和 WData)
+    typedef struct packed {
+        logic [ZONE_WIDTH-1:0]                  zone_id;
+        logic                                   accum_en;
+        logic [NUM_BANKS-1:0]                   mask;
+        logic [ADDR_WIDTH-1:0]                  addr;
+        logic [NUM_BANKS-1:0][DATA_WIDTH-1:0]   wdata; // 256 bits of data
+    } wr_payload_t;
+
+    // 读通道 Payload (只包含 Command)
+    typedef struct packed {
+        logic [ZONE_WIDTH-1:0]  zone_id;
+        logic [NUM_BANKS-1:0]   mask;
+        logic [ADDR_WIDTH-1:0]  addr;
+    } rd_payload_t;
+
+    // =================================================================
+    // 2. 内部信号定义 (Skid Buffer Inputs/Outputs)
+    // =================================================================
+    
+    // 写通道 Skid Buffer Inputs (Combinational Logic)
+    logic [NUM_ZONES-1:0] wr_valid_in_vec;
+    wr_payload_t          s_wr_payload;
+
+    // 读通道 Skid Buffer Inputs (Combinational Logic)
+    logic [NUM_ZONES-1:0] rd_valid_in_vec;
+    rd_payload_t          s_rd_payload;
+
+    // 反向 Ready 信号 (从 Skid Buffer 收集)
+    logic [NUM_ZONES-1:0] wr_skid_ready_vec;
+    logic [NUM_ZONES-1:0] rd_skid_ready_vec;
+
+
+    // =================================================================
+    // 3. 组合逻辑路由 (Pre-Buffer Logic)
+    // =================================================================
+    
+    // --- 3.1 准备 Payload ---
+    always_comb begin
+        s_wr_payload.zone_id  = s_cmd.wr_zone_id;
+        s_wr_payload.accum_en = s_cmd.accum_en;
+        s_wr_payload.wr_mask  = s_cmd.wr_mask;
+        s_wr_payload.wr_addr  = s_cmd.wr_addr;
+        s_wr_payload.wdata    = s_data.wdata;
+
+        s_rd_payload.zone_id  = s_cmd.rd_zone_id;
+        s_rd_payload.rd_mask  = s_cmd.rd_mask;
+        s_rd_payload.rd_addr  = s_cmd.rd_addr;
+    end
+
+    // --- 3.2 Valid Demux ---
+    // 这是纯组合逻辑，决定哪个 Buffer 接收输入
+    always_comb begin
+        for (int i = 0; i < NUM_ZONES; i++) begin
+            // 写通道 Demux: Valid = Master Valid AND (ID == i)
+            wr_valid_in_vec[i] = (s_cmd.wr_zone_id == i[ZONE_WIDTH-1:0]) ? (s_cmd.wr_valid && s_data.wvalid) : 1'b0;
+            // 读通道 Demux
+            rd_valid_in_vec[i] = (s_cmd.rd_zone_id == i[ZONE_WIDTH-1:0]) ? s_cmd.rd_valid : 1'b0;
+        end
+    end
+
+    // =================================================================
+    // 4. 实例化 Skid Buffers (Pipeline Stage)
+    // =================================================================
+    
+    // 收集反向数据 (为后面的 Mux 做准备)
     logic [NUM_ZONES-1:0] zone_rvalid_vec;
     logic [NUM_ZONES-1:0][NUM_BANKS-1:0][DATA_WIDTH-1:0] zone_rdata_vec;
 
-
-    // =================================================================
-    // 2. 前向驱动 & 反向采集 (使用 Generate)
-    // =================================================================
-    genvar i;
+    genvar z;
     generate
-        for (i = 0; i < NUM_ZONES; i++) begin : router_logic
+        for (z = 0; z < NUM_ZONES; z++) begin : gen_skid
             
-            // --- A. 前向驱动 (Forward Drive: Master -> Zones) ---
-            // 这是一个 1-to-N 的解复用 (Demux) 逻辑
-            // 必须在 generate 块里赋值，因为 m_cmd[i] 只能静态索引
+            wr_payload_t wr_payload_out;
+            rd_payload_t rd_payload_out;
+
+            // -------------------
+            // 4.1 写通道 Skid Buffer (将 Cmd + Data 打包)
+            // -------------------
+            Skid_Buffer #(
+                .DATA_WIDTH($bits(wr_payload_t)) 
+            ) u_wr_skid (
+                .clk     (clk), .rstn(rstn),
+                // Input
+                .s_valid (wr_valid_in_vec[z]),
+                .s_ready (skid_wr_ready_vec[z]), 
+                .s_data  (s_wr_payload),
+                // Output (连接 Zone Subsystem)
+                .m_valid (m_cmd[z].wr_valid), // 驱动 Zone Bus Valid
+                .m_ready (m_cmd[z].wr_ready),
+                .m_data  (wr_payload_out)
+            );
+
+            // 解包赋值 Control/Data
+            assign m_cmd[z].wr_zone_id = wr_payload_out.zone_id;
+            assign m_cmd[z].accum_en   = wr_payload_out.accum_en;
+            assign m_cmd[z].wr_mask    = wr_payload_out.mask;
+            assign m_cmd[z].wr_addr    = wr_payload_out.addr;
             
-            always_comb begin
-                // 1. 静态信号广播 (直接连过去)
-                m_cmd[i].wr_zone_id = s_cmd.wr_zone_id;
-                m_cmd[i].accum_en   = s_cmd.accum_en;
-                m_cmd[i].wr_mask    = s_cmd.wr_mask;
-                m_cmd[i].wr_addr    = s_cmd.wr_addr;
-                
-                m_cmd[i].rd_zone_id = s_cmd.rd_zone_id;
-                m_cmd[i].rd_mask    = s_cmd.rd_mask;
-                m_cmd[i].rd_addr    = s_cmd.rd_addr;
-                
-                m_data[i].wdata     = s_data.wdata; // 数据广播
+            assign m_data[z].wvalid    = m_cmd[z].wr_valid; // Data valid 跟随 Cmd valid
+            assign m_data[z].wdata     = wr_payload_out.wdata;
 
-                // 2. 动态 Valid 门控 (Routing)
-                // 只有目标 ID 匹配的 Zone 才会收到 Valid=1
-                
-                // 写通道
-                if (s_cmd.wr_zone_id == i[ZONE_WIDTH-1:0]) begin
-                    m_cmd[i].wr_valid = s_cmd.wr_valid;
-                    m_data[i].wvalid  = s_data.wvalid;
-                end else begin
-                    m_cmd[i].wr_valid = 1'b0;
-                    m_data[i].wvalid  = 1'b0;
-                end
 
-                // 读通道
-                if (s_cmd.rd_zone_id == i[ZONE_WIDTH-1:0]) begin
-                    m_cmd[i].rd_valid = s_cmd.rd_valid;
-                end else begin
-                    m_cmd[i].rd_valid = 1'b0;
-                end
-            end
+            // -------------------
+            // 4.2 读通道 Skid Buffer (只打包 Command)
+            // -------------------
+            Skid_Buffer #(
+                .DATA_WIDTH($bits(rd_payload_t))
+            ) u_rd_skid (
+                .clk     (clk), .rstn(rstn),
+                .s_valid (rd_valid_in_vec[z]),
+                .s_ready (skid_rd_ready_vec[z]),
+                .s_data  (s_rd_payload),
+                .m_valid (m_cmd[z].rd_valid),
+                .m_ready (m_cmd[z].rd_ready),
+                .m_data  (rd_payload_out)
+            );
 
-            // --- B. 反向采集 (Backward Unpack: Zones -> Vector) ---
-            // 将 Interface 里的反馈信号提取到普通 logic 数组中
-            assign zone_wr_ready_vec[i]    = m_cmd[i].wr_ready;
-            assign zone_rd_ready_vec[i]    = m_cmd[i].rd_ready;
-            assign zone_wdata_ready_vec[i] = m_data[i].wready;
-            assign zone_rvalid_vec[i]      = m_data[i].rvalid;
-            assign zone_rdata_vec[i]       = m_data[i].rdata;
+            // 解包赋值
+            assign m_cmd[z].rd_zone_id = rd_payload_out.zone_id;
+            assign m_cmd[z].rd_mask    = rd_payload_out.mask;
+            assign m_cmd[z].rd_addr    = rd_payload_out.addr;
+
+            // -------------------
+            // 4.3 反向数据采集
+            // -------------------
+            assign zone_rvalid_vec[z] = m_data[z].rvalid;
+            assign zone_rdata_vec[z]  = m_data[z].rdata;
 
         end
     endgenerate
 
 
     // =================================================================
-    // 3. 反向反馈 (Backward Muxing: Vectors -> Master)
-    //    现在我们可以使用动态 ID 安全地索引 Vector 了
+    // 5. 反向反馈 (Backward Muxing)
     // =================================================================
-    
-    always_comb begin
-        // --- A. 握手信号 Mux ---
-        // Master 看到的 Ready 取决于它当前想去哪 (target_id)
-        s_cmd.wr_ready = zone_wr_ready_vec[s_cmd.wr_zone_id];
-        s_cmd.rd_ready = zone_rd_ready_vec[s_cmd.rd_zone_id];
-        
-        // 写数据的 Ready 通常跟随 Write ID
-        s_data.wready  = zone_wdata_ready_vec[s_cmd.wr_zone_id];
 
-        // --- B. 读数据返回聚合 ---
-        // 任何一个 Zone 返回数据，都透传给 Master。
-        // 这里使用简单的轮询/或逻辑，因为对于单一 Master，同一时刻理论上只有一个 Zone 会回数据
+    always_comb begin
+        // --- A. Ready 信号选择 (Mux) ---
+        // Master 看到的 Ready 是来自它当前请求的那个 Zone 的 Skid Buffer
+        s_cmd.wr_ready = skid_wr_ready_vec[s_cmd.wr_zone_id];
+        s_data.wready  = skid_wr_ready_vec[s_cmd.wr_zone_id]; // Data ready 跟随 Write ready
+        
+        s_cmd.rd_ready = skid_rd_ready_vec[s_cmd.rd_zone_id];
+
+        // --- B. 读数据返回聚合 (Mux) ---
+        // 简单的 OR 逻辑：谁有 rvalid，就透传谁的数据
         s_data.rvalid = 1'b0;
         s_data.rdata  = '0;
 

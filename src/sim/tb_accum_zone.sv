@@ -179,9 +179,8 @@ module tb_accum_zone;
     // 6. 批量随机测试基础设施 (Batch Infrastructure)
     // ============================================================
     
-    // 【关键修正】使用 bit 类型防止 X 态传播
     // 定义一行数据 (Packed Array)
-    typedef bit [NUM_BANKS-1:0][DATA_WIDTH-1:0] row_t;
+    typedef logic [NUM_BANKS-1:0][DATA_WIDTH-1:0] row_t;
     
     // 关联数组作为参考模型 (Key=Addr)
     row_t ref_mem [int]; 
@@ -202,7 +201,7 @@ module tb_accum_zone;
             // 硬件写：master_write 内部会自动将数据设为 base_data + b
             master_write(0, i[ADDR_WIDTH-1:0], 4'b1111, 64'd0, 0);
             
-            // Scoreboard 初始化 (与硬件一致)
+            // 【修正点】：Scoreboard 初始化必须与硬件写入值一致 (0+b)
             for (int b=0; b<NUM_BANKS; b++) begin
                 ref_mem[i][b] = 64'd0 + b; 
             end
@@ -230,9 +229,9 @@ module tb_accum_zone;
             if (op_type == 0) begin
                 // >>> WRITE / ACCUMULATE <<<
                 
-                // 确保地址存在 (理论上 Scrubbing 后都存在)
                 if (!ref_mem.exists(addr)) begin
-                     for (int b=0; b<NUM_BANKS; b++) ref_mem[addr][b] = 64'd0 + b;
+                    // 初始化不存在的地址
+                    for (int b=0; b<NUM_BANKS; b++) ref_mem[addr][b] = 64'd0 + b;
                 end
                 
                 for (int b=0; b<NUM_BANKS; b++) begin
@@ -240,7 +239,7 @@ module tb_accum_zone;
                         logic [63:0] wr_val = base_data + b;
                         
                         if (is_acc) begin
-                            // 【Scoreboard SIMD 16-bit 加法】
+                            // Scoreboard SIMD 16-bit 加法
                             logic [DATA_WIDTH-1:0] current_val = ref_mem[addr][b];
                             logic [DATA_WIDTH-1:0] next_val;
                             
@@ -260,10 +259,9 @@ module tb_accum_zone;
                 // >>> READ & CHECK <<<
                 
                 row_t exp_row;
-                if (ref_mem.exists(addr)) begin
-                    exp_row = ref_mem[addr];
-                end else begin
-                    // 默认值 (Scrubbing 后的值)
+                if (ref_mem.exists(addr)) exp_row = ref_mem[addr];
+                else begin
+                    // 默认值 (Scrubbing 后是 0+b)
                     for(int b=0; b<NUM_BANKS; b++) exp_row[b] = 64'd0 + b;
                 end
 
@@ -314,7 +312,7 @@ module tb_accum_zone;
         sys_reset();
 
         // --------------------------------------------------------
-        // PHASE 1: 定向测试
+        // PHASE 1: 定向测试 (Directed Tests)
         // --------------------------------------------------------
         $display("\n--- PHASE 1: Directed Tests ---");
         
@@ -371,10 +369,10 @@ module tb_accum_zone;
         join
 
         // --------------------------------------------------------
-        // PHASE 2: 批量测试
-        // // --------------------------------------------------------
-        // $display("\n--- PHASE 2: Batch Random Tests ---");
-        // run_batch_test(BATCH_COUNT);
+        // PHASE 2: 批量测试 (Batch Test)
+        // --------------------------------------------------------
+        $display("\n--- PHASE 2: Batch Random Tests ---");
+        run_batch_test(BATCH_COUNT);
 
         $display("\n=== All Tests Finished ===");
         $finish;
