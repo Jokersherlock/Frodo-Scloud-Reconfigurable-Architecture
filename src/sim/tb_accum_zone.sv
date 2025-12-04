@@ -5,7 +5,7 @@ module tb_accum_zone;
     // ============================================================
     // 1. 参数定义
     // ============================================================
-    parameter NUM_SLOTS  = 2;   // 模拟 DMA(0) 和 Frodo(1)
+    parameter NUM_SLOTS  = 4;   // 模拟 DMA(0) 和 Frodo(1)
     parameter FIFO_DEPTH = 4;
     parameter NUM_BANKS  = 4;   // 4个Bank，对应SIMD宽度
     parameter ADDR_WIDTH = 9;

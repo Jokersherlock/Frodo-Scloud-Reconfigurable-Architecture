@@ -12,8 +12,8 @@ module Accum_Bus #(
     // =======================================================
     // 上行接口：连接 Masters (Slot 0, Slot 1...)
     // =======================================================
-    Accum_Cmd_If.Slave   cmd_slots  [NUM_SLOTS],
-    Accum_Data_If.Slave  data_slots [NUM_SLOTS],
+    Accum_Cmd_If   cmd_slots  [NUM_SLOTS],
+    Accum_Data_If  data_slots [NUM_SLOTS],
 
     // =======================================================
     // 下行接口：连接 Physical Wrapper

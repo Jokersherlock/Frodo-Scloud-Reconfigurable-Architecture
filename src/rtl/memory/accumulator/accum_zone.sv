@@ -12,8 +12,8 @@ module Accum_Zone #(
     // =======================================================
     // 对外接口：提供给外部 Master 连接的插槽
     // =======================================================
-    Accum_Cmd_If.Slave   slave_cmd_ports  [NUM_SLOTS],
-    Accum_Data_If.Slave  slave_data_ports [NUM_SLOTS]
+    Accum_Cmd_If   slave_cmd_ports  [NUM_SLOTS],
+    Accum_Data_If  slave_data_ports [NUM_SLOTS]
 );
 
     // =======================================================
