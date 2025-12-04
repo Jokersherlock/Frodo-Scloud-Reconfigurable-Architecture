@@ -103,46 +103,56 @@ module tb_accumulator;
         // 2. 硬件内存清洗 (Memory Scrubbing)
         $display("Initializing Hardware RAM to 0...");
         for (int i = 0; i < (1<<ADDR_WIDTH); i++) begin
-            // 采用安全时序
             @(negedge clk);
-            mode            <= 0;  // 覆盖模式 (Mode 0)
+            mode            <= 0; 
             ext_wr_if.en    <= 1;
             ext_wr_if.we    <= 1;
             ext_wr_if.addr  <= i[ADDR_WIDTH-1:0]; 
-            ext_wr_if.wdata <= '0; // 写入 0
+            ext_wr_if.wdata <= '0; 
             
             @(negedge clk);
             ext_wr_if.en <= 0;
             ext_wr_if.we <= 0;
         end
         
-        // 等待 4 级流水线排空
         repeat(5) @(posedge clk);
         $display("RAM Initialization Done.");
 
         // 3. 开始随机循环
         for (int i = 0; i < iterations; i++) begin
-            // --- 随机变量 ---
             logic [ADDR_WIDTH-1:0] rand_addr;
             logic [DATA_WIDTH-1:0] rand_data;
-            logic                  is_acc;
-            int                    op_type; 
+            logic is_acc;
+            int op_type; 
 
             void'(std::randomize(rand_addr, rand_data, is_acc, op_type) with {
-                op_type dist {0:=70, 1:=30};
-                is_acc  dist {0:=40, 1:=60};
+                op_type dist {0:=60, 1:=40};
+                is_acc  dist {0:=50, 1:=50};
             });
 
             if (op_type == 0) begin
                 // >>> WRITE / ACCUMULATE <<<
+                
                 logic [DATA_WIDTH-1:0] old_val;
+                logic [DATA_WIDTH-1:0] next_val; // 临时变量
+                
                 if (ref_mem.exists(rand_addr)) old_val = ref_mem[rand_addr];
                 else old_val = 0;
 
-                if (is_acc) ref_mem[rand_addr] = old_val + rand_data;
-                else ref_mem[rand_addr] = rand_data;
+                if (is_acc) begin
+                    // 【SIMD 16-bit 修正】：Scoreboard 执行分片加法
+                    for (int k = 0; k < DATA_WIDTH/16; k++) begin
+                        // 16位独立相加，利用位宽截断特性
+                        next_val[k*16 +: 16] = old_val[k*16 +: 16] + rand_data[k*16 +: 16];
+                    end
+                    ref_mem[rand_addr] = next_val;
 
-                // 驱动 DUT (采用安全时序)
+                end else begin
+                    // 覆盖模式
+                    ref_mem[rand_addr] = rand_data;
+                end
+
+                // 驱动 DUT 
                 @(negedge clk);
                 mode            <= is_acc;
                 ext_wr_if.en    <= 1;
@@ -170,10 +180,8 @@ module tb_accumulator;
                 @(posedge clk);
                 ext_rd_if.en   <= 0; // T1 Posedge 撤销
 
-                // T2 Posedge (等待 R1)
-                @(posedge clk); 
-                // T3 Posedge (数据稳定 R2)
-                @(posedge clk); 
+                @(posedge clk); // T2 Posedge (等待 R1)
+                @(posedge clk); // T3 Posedge (数据稳定 R2)
                 #1;
                 
                 if (ext_rd_if.rdata !== exp_val) begin
@@ -183,7 +191,6 @@ module tb_accumulator;
                 end
             end
             
-            // 每次操作后等待 3 拍，让流水线完成写回
             repeat(3) @(posedge clk);
             
             if (i > 0 && i % 1000 == 0) $display("Progress: %0d / %0d", i, iterations);
@@ -266,7 +273,6 @@ module tb_accumulator;
         @(posedge clk);
         ext_wr_if.en <= 0; ext_wr_if.we <= 0; ext_rd_if.en <= 0;
         
-        // Wait Latency=2 for read data (T0 -> T2)
         @(posedge clk); 
         @(posedge clk);
         #1;
