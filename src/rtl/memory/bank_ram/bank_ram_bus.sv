@@ -18,7 +18,6 @@ module bank_ram_bus #(
 
     // =======================================================
     // Part A: 信号解包 (Unpack Inputs)
-    // 将 Interface 数组转换为 Logic 数组，解决索引报错问题
     // =======================================================
     
     logic [NUM_SLOTS-1:0]       req_valid_vec;
@@ -27,7 +26,6 @@ module bank_ram_bus #(
     logic [NUM_SLOTS-1:0][8:0]  req_addr_vec;
     
     logic [NUM_SLOTS-1:0]       data_wvalid_vec;
-    // 修正: 数据位宽匹配 5 Banks * 32 Bits
     logic [NUM_SLOTS-1:0][NUM_BANKS-1:0][DATA_WIDTH-1:0] data_wdata_vec; 
 
     genvar g;
@@ -77,7 +75,7 @@ module bank_ram_bus #(
 
 
     // =======================================================
-    // Part C: 写路径处理 (Write Path: FIFO)
+    // Part C: 写路径处理 (Write Path: FIFO & Bypass)
     // =======================================================
     
     // 定义写指令 FIFO 结构
@@ -91,6 +89,10 @@ module bank_ram_bus #(
     logic fifo_push, fifo_pop;
     logic fifo_full, fifo_empty;
 
+    // 【新增】旁路条件：FIFO空 + 赢家是写操作 + 写数据也同步到达
+    logic do_bypass;
+    assign do_bypass = fifo_empty && winner_valid && (win_rw == 1'b1) && data_wvalid_vec[winner_id];
+
     // 实例化 FIFO (存储待处理的写地址)
     FIFO #(
         .WIDTH($bits(cmd_entry_t)),
@@ -102,13 +104,14 @@ module bank_ram_bus #(
         .full(fifo_full), .empty(fifo_empty)
     );
 
-    // 入队逻辑：有赢家 + 是写操作 + FIFO没满
+    // 入队逻辑：有赢家 + 是写操作 + FIFO没满 + 【不走旁路】
     assign fifo_din.src_id = winner_id;
     assign fifo_din.mask   = win_mask;
     assign fifo_din.addr   = win_addr;
-    assign fifo_push       = winner_valid && (win_rw == 1'b1) && !fifo_full;
+    assign fifo_push       = winner_valid && (win_rw == 1'b1) && !fifo_full && !do_bypass;
 
     // 出队逻辑：FIFO不空 + 对应 Master 的数据已到达
+    // (注意：如果走了旁路，数据直接被消费，不会进入这里)
     logic current_master_has_data;
     assign current_master_has_data = data_wvalid_vec[fifo_dout.src_id];
     assign fifo_pop = !fifo_empty && current_master_has_data;
@@ -124,7 +127,7 @@ module bank_ram_bus #(
     logic [$clog2(NUM_SLOTS)-1:0] rd_fifo_din;
     logic [$clog2(NUM_SLOTS)-1:0] rd_fifo_dout;
 
-    // 实例化读 ID FIFO (深度建议比 RAM_LATENCY 大一点)
+    // 实例化读 ID FIFO
     FIFO #(
         .WIDTH($clog2(NUM_SLOTS)),
         .DEPTH(8) 
@@ -137,6 +140,7 @@ module bank_ram_bus #(
 
     // 读请求是否被物理层接受？
     // 条件：有赢家 + 是读操作 + 物理层Ready + 没有积压的写操作(fifo_empty) + 读ID FIFO没满
+    // 注意：如果是旁路写操作，win_rw为1，这里read_accepted自然为0，互斥
     logic read_accepted;
     assign read_accepted = winner_valid && (win_rw == 1'b0) && phy_cmd_if.ready && fifo_empty && !rd_fifo_full;
 
@@ -160,19 +164,28 @@ module bank_ram_bus #(
         phy_data_if.wvalid = 0; 
         phy_data_if.wdata = '0;
 
-        // [A] 执行写操作 (优先级高)
-        if (fifo_pop) begin
+        if (do_bypass) begin
+            // [A] 旁路写 (Bypass Write) - 优先级最高 (0 latency)
+            phy_cmd_if.valid = 1'b1;
+            phy_cmd_if.rw    = 1'b1;
+            phy_cmd_if.mask  = win_mask;
+            phy_cmd_if.addr  = win_addr;
+            
+            phy_data_if.wvalid = 1'b1;
+            phy_data_if.wdata  = data_wdata_vec[winner_id]; // 直接取输入数据
+        end
+        else if (fifo_pop) begin
+            // [B] FIFO 写 (FIFO Write)
             phy_cmd_if.valid = 1'b1;
             phy_cmd_if.rw    = 1'b1;
             phy_cmd_if.mask  = fifo_dout.mask;
             phy_cmd_if.addr  = fifo_dout.addr;
             
             phy_data_if.wvalid = 1'b1;
-            // 从对应 Master 取数据
-            phy_data_if.wdata  = data_wdata_vec[fifo_dout.src_id];
+            phy_data_if.wdata  = data_wdata_vec[fifo_dout.src_id]; // 从 FIFO 指向的源取数据
         end
-        // [B] 执行读操作 (直通模式)
         else if (read_accepted) begin
+            // [C] 读操作 (Read Passthrough)
             phy_cmd_if.valid = 1'b1;
             phy_cmd_if.rw    = 1'b0;
             phy_cmd_if.mask  = win_mask;
@@ -201,8 +214,12 @@ module bank_ram_bus #(
             // --- 1. Cmd Ready ---
             if (i == winner_id) begin
                 if (win_rw == 1'b1) begin
-                    // 写操作：取决于写 FIFO 是否满
-                    slot_cmd_ready[i] = !fifo_full;
+                    // 写操作：
+                    if (do_bypass) begin
+                        slot_cmd_ready[i] = 1'b1; // 旁路模式直接 Ready
+                    end else begin
+                        slot_cmd_ready[i] = !fifo_full; // 否则看 FIFO
+                    end
                 end else begin
                     // 读操作：取决于物理 Ready + 写 FIFO 空 + 读 ID FIFO 未满
                     slot_cmd_ready[i] = phy_cmd_if.ready && fifo_empty && !rd_fifo_full;
@@ -210,9 +227,13 @@ module bank_ram_bus #(
             end
 
             // --- 2. Data Write Ready ---
-            // 如果 FIFO 不空，且该 Slot 是 FIFO 头部的源
-            if (!fifo_empty && (i[$clog2(NUM_SLOTS)-1:0] == fifo_dout.src_id)) begin
-                slot_data_wready[i] = fifo_pop; // 数据被消耗时发 Ready
+            if (do_bypass && (i == winner_id)) begin
+                // 【新增】旁路模式：数据当拍被消费
+                slot_data_wready[i] = 1'b1;
+            end 
+            else if (!fifo_empty && (i[$clog2(NUM_SLOTS)-1:0] == fifo_dout.src_id)) begin
+                // 传统模式：FIFO 出队时消耗数据
+                slot_data_wready[i] = fifo_pop; 
             end
             
             // --- 3. Read Data Valid ---
@@ -224,7 +245,6 @@ module bank_ram_bus #(
             end
             
             // --- 4. Read Data (Broadcast) ---
-            // 数据内容直接广播，安全性由 rvalid 保证
             slot_rdata[i] = phy_data_if.rdata;
         end
     end
