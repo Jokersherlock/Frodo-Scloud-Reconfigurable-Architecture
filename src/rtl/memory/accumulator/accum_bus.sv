@@ -92,7 +92,14 @@ module Accum_Bus #(
     assign win_wr_mask  = wr_mask_vec[wr_winner_id];
     assign win_wr_addr  = wr_addr_vec[wr_winner_id];
 
-    // --- 1.3 写指令 FIFO (存储 Cmd 等待 Data) ---
+    // --- 1.3 旁路/透传逻辑 (Bypass Logic) ---
+    // 【关键优化】：当 FIFO 为空，且数据随命令同步到达时，直接透传，不进 FIFO
+    logic do_bypass;
+    logic wr_fifo_empty; // 提前声明用于 bypass 判断
+    
+    assign do_bypass = wr_fifo_empty && wr_winner_valid && data_wvalid_vec[wr_winner_id];
+
+    // --- 1.4 写指令 FIFO (存储 Cmd 等待 Data) ---
     typedef struct packed {
         logic [$clog2(NUM_SLOTS)-1:0] src_id;
         logic                         accum_en;
@@ -102,7 +109,7 @@ module Accum_Bus #(
 
     wr_cmd_entry_t wr_fifo_din, wr_fifo_dout;
     logic wr_fifo_push, wr_fifo_pop;
-    logic wr_fifo_full, wr_fifo_empty;
+    logic wr_fifo_full;
 
     FIFO #(
         .WIDTH($bits(wr_cmd_entry_t)), .DEPTH(FIFO_DEPTH)
@@ -113,14 +120,16 @@ module Accum_Bus #(
         .full(wr_fifo_full), .empty(wr_fifo_empty)
     );
 
-    // 入队逻辑
+    // 入队逻辑：赢家有效 && FIFO 不满 && (如果不走旁路)
     assign wr_fifo_din.src_id   = wr_winner_id;
     assign wr_fifo_din.accum_en = win_accum_en;
     assign wr_fifo_din.mask     = win_wr_mask;
     assign wr_fifo_din.addr     = win_wr_addr;
-    assign wr_fifo_push         = wr_winner_valid && !wr_fifo_full; // 只要 FIFO 没满就收
+    
+    assign wr_fifo_push         = wr_winner_valid && !wr_fifo_full && !do_bypass;
 
     // 出队逻辑：FIFO 不空且对应的数据已到达
+    // (注意：旁路发生时，这里不会触发 pop，因为数据直接走了旁路，没进 FIFO)
     logic wr_data_arrived;
     assign wr_data_arrived = data_wvalid_vec[wr_fifo_dout.src_id];
     assign wr_fifo_pop     = !wr_fifo_empty && wr_data_arrived;
@@ -188,6 +197,7 @@ module Accum_Bus #(
 
     always_comb begin
         // --- 3.1 驱动写通道 (Port A) ---
+        // 默认值
         phy_cmd_if.wr_valid   = 1'b0;
         phy_cmd_if.accum_en   = 1'b0;
         phy_cmd_if.wr_mask    = '0;
@@ -197,7 +207,18 @@ module Accum_Bus #(
         phy_data_if.wvalid    = 1'b0;
         phy_data_if.wdata     = '0;
 
-        if (wr_fifo_pop) begin
+        if (do_bypass) begin
+            // 【新增】：旁路模式 (透传输入)
+            phy_cmd_if.wr_valid = 1'b1;
+            phy_cmd_if.accum_en = win_accum_en;
+            phy_cmd_if.wr_mask  = win_wr_mask;
+            phy_cmd_if.wr_addr  = win_wr_addr;
+            
+            phy_data_if.wvalid  = 1'b1;
+            phy_data_if.wdata   = data_wdata_vec[wr_winner_id];
+
+        end else if (wr_fifo_pop) begin
+            // 原有模式 (透传 FIFO 输出)
             phy_cmd_if.wr_valid = 1'b1;
             phy_cmd_if.accum_en = wr_fifo_dout.accum_en;
             phy_cmd_if.wr_mask  = wr_fifo_dout.mask;
@@ -238,7 +259,13 @@ module Accum_Bus #(
         for (int i = 0; i < NUM_SLOTS; i++) begin
             // 4.1 写命令握手
             if (i == wr_winner_id) begin
-                slot_wr_ready[i] = !wr_fifo_full;
+                if (do_bypass) begin
+                    // 旁路模式：直接接受，不需要看 FIFO 满不满 (因为根本不进 FIFO)
+                    slot_wr_ready[i] = 1'b1;
+                end else begin
+                    // 正常模式：FIFO 不满则接受
+                    slot_wr_ready[i] = !wr_fifo_full;
+                end
             end
 
             // 4.2 读命令握手
@@ -248,8 +275,11 @@ module Accum_Bus #(
             end
 
             // 4.3 写数据握手
-            // 如果 FIFO 不空，且当前 Slot 是 FIFO 头部的源
-            if (!wr_fifo_empty && (i[$clog2(NUM_SLOTS)-1:0] == wr_fifo_dout.src_id)) begin
+            if (do_bypass && (i == wr_winner_id)) begin
+                // 【新增】：旁路模式下，数据随命令一起被直接消费
+                slot_wdata_ready[i] = 1'b1; 
+            end else if (!wr_fifo_empty && (i[$clog2(NUM_SLOTS)-1:0] == wr_fifo_dout.src_id)) begin
+                // 原有逻辑：FIFO 头部匹配
                 slot_wdata_ready[i] = wr_fifo_pop;
             end
 

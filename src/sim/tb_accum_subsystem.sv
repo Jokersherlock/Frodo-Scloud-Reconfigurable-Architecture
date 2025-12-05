@@ -18,7 +18,7 @@ module tb_accum_subsystem;
     // =======================================================
     logic clk, rstn;
 
-    // A. 路由接口 (Routed Ports) - 可以访问任意 Zone
+    // A. 路由接口
     Accum_Cmd_If #(
         .NUM_BANKS(NUM_BANKS), .ADDR_WIDTH(ADDR_WIDTH), .ZONE_WIDTH(ZONE_WIDTH)
     ) routed_cmd_if[NUM_ROUTED_MASTERS] (clk, rstn);
@@ -27,7 +27,7 @@ module tb_accum_subsystem;
         .NUM_BANKS(NUM_BANKS), .DATA_WIDTH(DATA_WIDTH)
     ) routed_data_if[NUM_ROUTED_MASTERS] (clk, rstn);
 
-    // B. 直连接口 (Direct Ports) - 索引 [i] 对应 Zone [i]
+    // B. 直连接口
     Accum_Cmd_If #(
         .NUM_BANKS(NUM_BANKS), .ADDR_WIDTH(ADDR_WIDTH), .ZONE_WIDTH(ZONE_WIDTH)
     ) direct_cmd_if[NUM_DIRECT_PORTS] (clk, rstn);
@@ -37,7 +37,7 @@ module tb_accum_subsystem;
     ) direct_data_if[NUM_DIRECT_PORTS] (clk, rstn);
 
     // =======================================================
-    // 3. 虚接口定义 (用于 Task)
+    // 3. 虚接口定义
     // =======================================================
     virtual Accum_Cmd_If  v_routed_cmd [NUM_ROUTED_MASTERS];
     virtual Accum_Data_If v_routed_data[NUM_ROUTED_MASTERS];
@@ -46,7 +46,21 @@ module tb_accum_subsystem;
     virtual Accum_Data_If v_direct_data[NUM_DIRECT_PORTS];
 
     // =======================================================
-    // 4. DUT 实例化
+    // 4. [关键修复] 信号保活锚点 (Keep-Alive Anchors)
+    // =======================================================
+    // 显式定义 wire 数组并连接，防止仿真器优化掉虚接口的回读路径
+    // 这解决了 "波形有值但 TB 读到 0" 的问题
+    logic [NUM_BANKS-1:0][DATA_WIDTH-1:0] debug_routed_rdata [NUM_ROUTED_MASTERS];
+    
+    genvar k;
+    generate
+        for(k=0; k<NUM_ROUTED_MASTERS; k++) begin : keep_alive
+            assign debug_routed_rdata[k] = routed_data_if[k].rdata;
+        end
+    endgenerate
+
+    // =======================================================
+    // 5. DUT 实例化
     // =======================================================
     Accum_Subsystem #(
         .FIFO_DEPTH         (FIFO_DEPTH),
@@ -65,14 +79,13 @@ module tb_accum_subsystem;
     );
 
     // =======================================================
-    // 5. 时钟与虚接口连接
+    // 6. 时钟与连接
     // =======================================================
     initial begin
         clk = 0;
         forever #5 clk = ~clk;
     end
 
-    // 连接 Routed 接口
     genvar r;
     generate
         for (r = 0; r < NUM_ROUTED_MASTERS; r++) begin : bind_routed
@@ -83,7 +96,6 @@ module tb_accum_subsystem;
         end
     endgenerate
 
-    // 连接 Direct 接口
     genvar d;
     generate
         for (d = 0; d < NUM_DIRECT_PORTS; d++) begin : bind_direct
@@ -95,14 +107,13 @@ module tb_accum_subsystem;
     endgenerate
 
     // =======================================================
-    // 6. 辅助任务 (Tasks)
+    // 7. 辅助任务 (Tasks)
     // =======================================================
 
     // --- Task: 全局复位 ---
     task sys_reset();
         $display("[%0t] System Reset...", $time);
         rstn = 0;
-        // 复位 Routed 接口
         for(int i=0; i<NUM_ROUTED_MASTERS; i++) begin
             v_routed_cmd[i].wr_valid = 0; v_routed_cmd[i].rd_valid = 0;
             v_routed_cmd[i].wr_addr = 0;  v_routed_cmd[i].rd_addr = 0;
@@ -110,7 +121,6 @@ module tb_accum_subsystem;
             v_routed_cmd[i].accum_en = 0; v_routed_cmd[i].wr_zone_id = 0;
             v_routed_data[i].wvalid = 0;  v_routed_data[i].wdata = '0;
         end
-        // 复位 Direct 接口
         for(int i=0; i<NUM_DIRECT_PORTS; i++) begin
             v_direct_cmd[i].wr_valid = 0; v_direct_cmd[i].rd_valid = 0;
             v_direct_cmd[i].wr_addr = 0;  v_direct_cmd[i].rd_addr = 0;
@@ -124,10 +134,7 @@ module tb_accum_subsystem;
         $display("[%0t] Reset Done.", $time);
     endtask
 
-    // --- 通用写任务 ---
-    // is_routed: 1=Routed Port, 0=Direct Port
-    // port_idx: 端口索引
-    // dest_zone: 目标 Zone (Routed模式必填；Direct模式下此参数被忽略，但用于日志)
+    // --- 通用写任务 (增加了 inc_data 参数，默认为 1) ---
     task automatic master_write(
         input bit   is_routed,
         input int   port_idx,
@@ -135,13 +142,13 @@ module tb_accum_subsystem;
         input logic [ADDR_WIDTH-1:0] addr,
         input logic [NUM_BANKS-1:0]  mask,
         input logic [63:0]           base_data,
-        input logic                  accum_en
+        input logic                  accum_en,
+        input bit                    inc_data = 1 // 【新增】控制数据是否随 Bank ID 递增
     );
         virtual Accum_Cmd_If  cmd_if;
         virtual Accum_Data_If data_if;
         logic [ZONE_WIDTH-1:0] target_id;
 
-        // 1. 选择接口句柄并确定 Zone ID
         if (is_routed) begin
             cmd_if    = v_routed_cmd[port_idx];
             data_if   = v_routed_data[port_idx];
@@ -149,11 +156,9 @@ module tb_accum_subsystem;
         end else begin
             cmd_if    = v_direct_cmd[port_idx];
             data_if   = v_direct_data[port_idx];
-            // 【Direct 端口 ID 始终等于端口索引】
             target_id = port_idx[ZONE_WIDTH-1:0]; 
         end
 
-        // 2. 启动阶段 (下降沿驱动)
         @(negedge clk);
         cmd_if.wr_valid   = 1;
         cmd_if.accum_en   = accum_en; 
@@ -163,10 +168,10 @@ module tb_accum_subsystem;
 
         data_if.wvalid    = 1;
         for(int b=0; b<NUM_BANKS; b++) begin
-            data_if.wdata[b] = base_data + b;
+            // 【修改】根据参数决定是否加 b
+            data_if.wdata[b] = base_data + (inc_data ? b : 0);
         end
 
-        // 3. 握手阶段 (分离的 Ready)
         fork : wr_handshake
             begin
                 while (cmd_if.wr_ready !== 1'b1) @(posedge clk);
@@ -186,7 +191,7 @@ module tb_accum_subsystem;
             $display("[%0t] Direct Port %0d (Zone %0d) Write Done (Acc=%b). Addr=0x%x", $time, port_idx, target_id, accum_en, addr);
     endtask
 
-    // --- 通用读检查任务 ---
+    // --- 通用读检查任务 (修正版) ---
     task automatic master_read_check(
         input bit   is_routed,
         input int   port_idx,
@@ -198,6 +203,7 @@ module tb_accum_subsystem;
         virtual Accum_Cmd_If  cmd_if;
         virtual Accum_Data_If data_if;
         logic [ZONE_WIDTH-1:0] target_id;
+        logic [63:0]           captured_data; // 本地变量存数据
 
         if (is_routed) begin
             cmd_if    = v_routed_cmd[port_idx];
@@ -221,17 +227,29 @@ module tb_accum_subsystem;
         @(negedge clk);
         cmd_if.rd_valid = 0;
 
-        // 3. 等待 rvalid 并检查
+        // 3. 等待数据并检查
         fork : rd_wait
             begin
+                // 等待 Valid 变高
                 while (data_if.rvalid !== 1'b1) @(posedge clk);
-                @(negedge clk); 
+                
+                // 【核心修改】在上升沿后稍微延时，避开 Delta Cycle 竞争
+                // 此时对于 Router 的组合逻辑输出，数据绝对有效
+            //#1; 
 
                 for(int b=0; b<NUM_BANKS; b++) begin
                     if (mask[b]) begin
-                        if (data_if.rdata[b] !== (exp_base_data + b)) begin
+                        // 【核心修改】
+                        // 如果是 Routed 模式，读取模块级的 wire 数组，而不是虚接口
+                        if (is_routed) begin
+                            captured_data = debug_routed_rdata[port_idx][b];
+                        end else begin
+                            captured_data = data_if.rdata[b];
+                        end
+
+                        if (captured_data !== (exp_base_data + b)) begin
                             $error("[FAIL] %s Port %0d Zone %0d Bank %0d: Exp %h Got %h", 
-                                (is_routed ? "Routed":"Direct"), port_idx, target_id, b, exp_base_data+b, data_if.rdata[b]);
+                                (is_routed ? "Routed":"Direct"), port_idx, target_id, b, exp_base_data+b, captured_data);
                         end
                     end
                 end
@@ -247,66 +265,59 @@ module tb_accum_subsystem;
     endtask
 
     // =======================================================
-    // 7. 主测试流程
+    // 8. 主测试流程
     // =======================================================
     initial begin
         #10;
         sys_reset();
 
         // ------------------------------------------------------------
-        // Case 1: 直连端口基础测试 (Direct Port 0 -> Zone 0)
+        // Case 1: 直连端口基础测试
         // ------------------------------------------------------------
         $display("\n=== Test 1: Direct Port 0 Basic RW ===");
-        // Direct Port 0, Zone ID 自动设为 0
-        master_write(0, 1, 0, 9'h010, 4'b1111, 64'hA000_0000_0000_0000, 0);
+        master_write(0, 0, 0, 9'h010, 4'b1111, 64'hA000_0000_0000_0000, 0);
         repeat(5) @(posedge clk);
-        master_read_check(0, 1, 0, 9'h010, 4'b1111, 64'hA000_0000_0000_0000);
-
-        // master_write(0, 1, 1, 9'h010, 4'b1111, 64'hB000_0000_0000_0000, 0);
-        // repeat(5) @(posedge clk);
-        // master_read_check(0, 1, 1, 9'h010, 4'b1111, 64'hB000_0000_0000_0000);
+        master_read_check(0, 0, 0, 9'h010, 4'b1111, 64'hA000_0000_0000_0000);
 
 
         // ------------------------------------------------------------
-        // Case 2: 路由端口基础测试 (Routed Port 0 -> Router -> Zone 1)
+        // Case 2: 路由端口基础测试
         // ------------------------------------------------------------
         $display("\n=== Test 2: Routed Port Access (Zone 1) ===");
-        // Routed Port 0, Target Zone 1
         master_write(1, 0, 1, 9'h020, 4'b1111, 64'hB000_0000_0000_0000, 0);
         repeat(5) @(posedge clk);
         master_read_check(1, 0, 1, 9'h020, 4'b1111, 64'hB000_0000_0000_0000);
 
 
         // ------------------------------------------------------------
-        // Case 3: 累加功能测试 (Direct Port 2 -> Zone 2)
+        // Case 3: 累加功能测试 (已修复数学逻辑)
         // ------------------------------------------------------------
         $display("\n=== Test 3: Accumulate Operation (Zone 2) ===");
         
-        // 1. 初始化: Direct Port 2 (Zone 2), Addr 0x30, Val = 10
-        master_write(0, 2, 2, 9'h030, 4'b1111, 64'd10, 0); // Accum=0
+        // 1. 初始化: 写入 10+b (Bank0=10, Bank1=11...)
+        // inc_data 使用默认值 1
+        master_write(0, 2, 2, 9'h030, 4'b1111, 64'd10, 0); 
         
-        // 2. 累加: Direct Port 2 (Zone 2), Addr 0x30, Val = 20 (Expected = 30)
-        master_write(0, 2, 2, 9'h030, 4'b1111, 64'd20, 1); // Accum=1
+        // 2. 累加: 所有 Bank 统一加 20
+        // 【关键】将 inc_data 设为 0
+        // 结果: (10+b) + 20 = 30+b。这完美符合 master_read_check 的预期。
+        master_write(0, 2, 2, 9'h030, 4'b1111, 64'd20, 1, 0); 
         
         repeat(5) @(posedge clk);
-        // 3. 检查结果
+        // 3. 检查结果: 期望 30+b
         master_read_check(0, 2, 2, 9'h030, 4'b1111, 64'd30);
 
 
         // ------------------------------------------------------------
-        // Case 4: 跨端口冲突仲裁 (Direct 3 vs Routed -> Zone 3)
+        // Case 4: 跨端口冲突仲裁
         // ------------------------------------------------------------
         $display("\n=== Test 4: Arbitration (Direct 3 vs Routed -> Zone 3) ===");
         
-        // 准备冲突：同时发起 Direct Port 3 和 Routed Port (Target Zone 3)
         @(negedge clk);
-        
-        // Direct Port 3 Request (Zone ID 自动为 3)
+        // Direct Port 3 Request
         v_direct_cmd[3].wr_valid = 1; v_direct_cmd[3].accum_en = 0; 
         v_direct_cmd[3].wr_zone_id = 3; 
         v_direct_cmd[3].wr_addr = 9'h100; v_direct_cmd[3].wr_mask = 4'hF;
-        
-        // 【已修正】使用合法 HEX 值
         v_direct_data[3].wvalid = 1;  
         v_direct_data[3].wdata[0] = 64'hDDDD_DDDD_DDDD_DDDD; 
 
@@ -314,26 +325,59 @@ module tb_accum_subsystem;
         v_routed_cmd[0].wr_valid = 1; v_routed_cmd[0].accum_en = 0; 
         v_routed_cmd[0].wr_zone_id = 3; 
         v_routed_cmd[0].wr_addr = 9'h200; v_routed_cmd[0].wr_mask = 4'hF;
-        
-        // 【已修正】使用合法 HEX 值
         v_routed_data[0].wvalid = 1;  
         v_routed_data[0].wdata[0] = 64'hAAAA_AAAA_AAAA_AAAA;
 
-        // 检查下一拍谁获得了 Ready
-        @(posedge clk); #1;
+        @(posedge clk); #1; 
         
-        // Zone 内部的 Arbiter 可能会选择其中一个
         if (v_direct_cmd[3].wr_ready && !v_routed_cmd[0].wr_ready)
             $display("INFO: Direct Port won arbitration.");
         else if (!v_direct_cmd[3].wr_ready && v_routed_cmd[0].wr_ready)
             $display("INFO: Routed Port won arbitration.");
         else
-            $display("INFO: Both ready or None ready (Check FIFO depth).");
+            $display("INFO: Arbitration Check. ReadyD=%b ReadyR=%b", v_direct_cmd[3].wr_ready, v_routed_cmd[0].wr_ready);
 
-        // 清理
+        // Clear
         repeat(2) @(negedge clk);
         v_direct_cmd[3].wr_valid = 0; v_direct_data[3].wvalid = 0;
         v_routed_cmd[0].wr_valid = 0; v_routed_data[0].wvalid = 0;
+
+
+        // ------------------------------------------------------------
+        // Case 5: 验证旁路(Bypass) 0延迟特性
+        // ------------------------------------------------------------
+        $display("\n=== Test 5: Zero-Latency Bypass Check (Zone 0) ===");
+        
+        // 确保总线空闲
+        repeat(5) @(posedge clk);
+
+        // 1. 发起写请求 (Cmd + Data 同时)
+        @(negedge clk);
+        v_direct_cmd[0].wr_valid   = 1;
+        v_direct_cmd[0].wr_addr    = 9'h099;
+        v_direct_cmd[0].wr_mask    = 4'hF; 
+        v_direct_cmd[0].accum_en   = 0;
+        v_direct_cmd[0].wr_zone_id = 0;
+
+        v_direct_data[0].wvalid    = 1;
+        v_direct_data[0].wdata[0]  = 64'hBEEF_CAFE;
+
+        // 2. 检查同一拍是否 Ready (即是否走了旁路)
+        // 在 posedge 后的 #1 时刻检查，此时组合逻辑输出应已稳定
+        @(posedge clk); #1; 
+        
+        // 只有 Bypass 成功，cmd_ready 和 data_ready 才会同时在 T0 变高
+        if (v_direct_cmd[0].wr_ready == 1'b1 && v_direct_data[0].wready == 1'b1) begin
+            $display("[PASS] Zero Latency Achieved! Ready was high immediately.");
+        end else begin
+            $error("[FAIL] Latency Detected. Ready was LOW (Bypass logic failed). CmdReady=%b DataReady=%b", 
+                   v_direct_cmd[0].wr_ready, v_direct_data[0].wready);
+        end
+
+        // 3. 撤销
+        @(negedge clk);
+        v_direct_cmd[0].wr_valid = 0;
+        v_direct_data[0].wvalid  = 0;
 
         #100;
         $display("\n=== All Tests Finished ===");
