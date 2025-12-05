@@ -18,38 +18,38 @@ module FIFO #(
     output logic             empty
 );
 
-`ifdef USE_IP
-    // =======================================================
-    // 分支 A: 实例化 FIFO IP 核 (以 Xilinx XPM 为例)
-    // =======================================================
+// `ifdef USE_IP
+//     // =======================================================
+//     // 分支 A: 实例化 FIFO IP 核 (以 Xilinx XPM 为例)
+//     // =======================================================
     
-    // 必须配置为 "First Word Fall Through" (FWFT) 模式
+//     // 必须配置为 "First Word Fall Through" (FWFT) 模式
     
-    xpm_fifo_sync #(
-        .FIFO_MEMORY_TYPE    ("auto"), 
-        .FIFO_WRITE_DEPTH    (DEPTH),
-        .WRITE_DATA_WIDTH    (WIDTH),
-        .READ_DATA_WIDTH     (WIDTH),
-        .READ_MODE           ("fwft"), // **关键**: 必须是 FWFT
-        .USE_ADV_FEATURES    ("0000") 
-    ) u_ip_fifo (
-        .wr_clk    (clk),
-        .rst       (~rstn), // XPM 通常是高电平复位，需要取反
-        .wr_en     (push),
-        .din       (din),
-        .rd_en     (pop),
-        .dout      (dout),
-        .full      (full),
-        .empty     (empty),
-        // 未使用的端口
-        .wr_rst_busy (),
-        .rd_rst_busy (),
-        .data_valid  (),
-        .underflow   (),
-        .overflow    ()
-    );
+//     xpm_fifo_sync #(
+//         .FIFO_MEMORY_TYPE    ("auto"), 
+//         .FIFO_WRITE_DEPTH    (DEPTH),
+//         .WRITE_DATA_WIDTH    (WIDTH),
+//         .READ_DATA_WIDTH     (WIDTH),
+//         .READ_MODE           ("fwft"), // **关键**: 必须是 FWFT
+//         .USE_ADV_FEATURES    ("0000") 
+//     ) u_ip_fifo (
+//         .wr_clk    (clk),
+//         .rst       (~rstn), // XPM 通常是高电平复位，需要取反
+//         .wr_en     (push),
+//         .din       (din),
+//         .rd_en     (pop),
+//         .dout      (dout),
+//         .full      (full),
+//         .empty     (empty),
+//         // 未使用的端口
+//         .wr_rst_busy (),
+//         .rd_rst_busy (),
+//         .data_valid  (),
+//         .underflow   (),
+//         .overflow    ()
+//     );
 
-`else
+// `else
     // =======================================================
     // 分支 B: RTL 实现 (寄存器数组, FWFT)
     // =======================================================
@@ -93,6 +93,6 @@ module FIFO #(
             endcase
         end
     end
-`endif
+// `endif
 
 endmodule

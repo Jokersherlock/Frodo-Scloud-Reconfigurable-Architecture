@@ -258,9 +258,9 @@ module tb_accum_subsystem;
         // ------------------------------------------------------------
         $display("\n=== Test 1: Direct Port 0 Basic RW ===");
         // Direct Port 0, Zone ID 自动设为 0
-        master_write(0, 0, 0, 9'h010, 4'b1111, 64'hA000_0000_0000_0000, 0);
+        master_write(0, 1, 0, 9'h010, 4'b1111, 64'hA000_0000_0000_0000, 0);
         repeat(5) @(posedge clk);
-        master_read_check(0, 0, 0, 9'h010, 4'b1111, 64'hA000_0000_0000_0000);
+        master_read_check(0, 1, 0, 9'h010, 4'b1111, 64'hA000_0000_0000_0000);
 
         // master_write(0, 1, 1, 9'h010, 4'b1111, 64'hB000_0000_0000_0000, 0);
         // repeat(5) @(posedge clk);

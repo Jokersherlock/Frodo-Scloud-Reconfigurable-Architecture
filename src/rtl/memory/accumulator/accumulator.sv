@@ -60,7 +60,7 @@ module accumulator #(
     // ============================================================
     always_ff @(posedge clk or negedge rstn) begin
         if (!rstn) begin
-            for (int i = 0; i < 3; i++) pipe[i] <= '0; 
+            for (int i = 0; i < 2; i++) pipe[i] <= '0; 
             // alu_result_reg <= '0; 
             wr_cmd_reg <= '0;
             history[0] <= '0;
