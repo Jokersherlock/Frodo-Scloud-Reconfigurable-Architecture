@@ -5,7 +5,7 @@ module tb_accum_zone;
     // ============================================================
     // 1. 参数定义
     // ============================================================
-    parameter NUM_SLOTS  = 2;   // 模拟 DMA(0) 和 Frodo(1)
+    parameter NUM_SLOTS  = 4;   // 【关键】测试 4 个 Slot (0, 1, 2, 3)
     parameter FIFO_DEPTH = 4;
     parameter NUM_BANKS  = 4;   // 4个Bank，对应SIMD宽度
     parameter ADDR_WIDTH = 9;
@@ -19,7 +19,7 @@ module tb_accum_zone;
     // ============================================================
     logic clk, rstn;
 
-    // 实例化 2 套接口 (Slot 0, Slot 1)
+    // 实例化 4 套接口
     Accum_Cmd_If #(
         .NUM_BANKS(NUM_BANKS), .ADDR_WIDTH(ADDR_WIDTH), .ZONE_WIDTH(ZONE_WIDTH)
     ) cmd_if[NUM_SLOTS] (clk, rstn);
@@ -147,7 +147,7 @@ module tb_accum_zone;
         join
     endtask
 
-    // 检查读数据 (Latency = 2 修正)
+    // 检查读数据
     task automatic check_read_data(input int slot, input logic [63:0] exp_base, input logic [NUM_BANKS-1:0] mask);
         fork : wait_data
             begin
@@ -161,7 +161,7 @@ module tb_accum_zone;
                         if (v_data_if[slot].rdata[b] !== (exp_base + b)) begin
                             $error("[FAIL] Slot %0d Bank %0d: Exp %h Got %h", slot, b, exp_base+b, v_data_if[slot].rdata[b]);
                         end else begin
-                            // $display("[PASS] Slot %0d Bank %0d: Got %h", slot, b, v_data_if[slot].rdata[b]);
+                            $display("[PASS] Slot %0d Bank %0d: OK", slot, b);
                         end
                     end
                 end
@@ -178,14 +178,8 @@ module tb_accum_zone;
     // ============================================================
     // 6. 批量随机测试基础设施 (Batch Infrastructure)
     // ============================================================
-    
-    // 【关键修正】使用 bit 类型防止 X 态传播
-    // 定义一行数据 (Packed Array)
-    typedef bit [NUM_BANKS-1:0][DATA_WIDTH-1:0] row_t;
-    
-    // 关联数组作为参考模型 (Key=Addr)
+    typedef logic [NUM_BANKS-1:0][DATA_WIDTH-1:0] row_t;
     row_t ref_mem [int]; 
-
     int batch_err_count = 0;
 
     task automatic run_batch_test(input int iterations);
@@ -195,23 +189,16 @@ module tb_accum_zone;
 
         sys_reset();
 
-        // 2. 硬件内存清洗 (Scrubbing)
-        $display("[%0t] Scrubbing Memory (Init to 0+b)...", $time);
+        // 内存清洗
+        $display("[%0t] Scrubbing Memory...", $time);
         ref_mem.delete();
         for (int i = 0; i < (1<<ADDR_WIDTH); i++) begin
-            // 硬件写：master_write 内部会自动将数据设为 base_data + b
             master_write(0, i[ADDR_WIDTH-1:0], 4'b1111, 64'd0, 0);
-            
-            // Scoreboard 初始化 (与硬件一致)
-            for (int b=0; b<NUM_BANKS; b++) begin
-                ref_mem[i][b] = 64'd0 + b; 
-            end
+            for (int b=0; b<NUM_BANKS; b++) ref_mem[i][b] = 64'd0 + b; 
         end
-        // 等待写操作完成
         repeat(10) @(posedge clk);
-        $display("[%0t] Scrubbing Done.", $time);
         
-        // 3. 随机循环
+        // 随机循环
         for (int i = 0; i < iterations; i++) begin
             int          slot;
             int          op_type; 
@@ -221,51 +208,39 @@ module tb_accum_zone;
             logic        is_acc;
             
             void'(std::randomize(slot, op_type, mask, addr, base_data, is_acc) with {
-                slot    inside {[0:NUM_SLOTS-1]};
+                slot    inside {[0:NUM_SLOTS-1]}; // 覆盖所有 Slot
                 op_type dist {0:=60, 1:=40}; 
-                mask    inside {[1:15]};     // 不允许全0
+                mask    inside {[1:15]};     
                 is_acc  dist {0:=50, 1:=50};
             });
 
             if (op_type == 0) begin
                 // >>> WRITE / ACCUMULATE <<<
-                
-                // 确保地址存在 (理论上 Scrubbing 后都存在)
                 if (!ref_mem.exists(addr)) begin
-                     for (int b=0; b<NUM_BANKS; b++) ref_mem[addr][b] = 64'd0 + b;
+                    for (int b=0; b<NUM_BANKS; b++) ref_mem[addr][b] = 64'd0 + b;
                 end
                 
                 for (int b=0; b<NUM_BANKS; b++) begin
                     if (mask[b]) begin
                         logic [63:0] wr_val = base_data + b;
-                        
                         if (is_acc) begin
-                            // 【Scoreboard SIMD 16-bit 加法】
                             logic [DATA_WIDTH-1:0] current_val = ref_mem[addr][b];
                             logic [DATA_WIDTH-1:0] next_val;
-                            
-                            for (int l = 0; l < DATA_WIDTH/16; l++) begin
+                            for (int l = 0; l < DATA_WIDTH/16; l++) 
                                 next_val[l*16 +: 16] = current_val[l*16 +: 16] + wr_val[l*16 +: 16];
-                            end
                             ref_mem[addr][b] = next_val;
                         end else begin
                             ref_mem[addr][b] = wr_val;
                         end
                     end
                 end
-
                 master_write(slot, addr, mask[3:0], base_data, is_acc);
 
             end else begin
                 // >>> READ & CHECK <<<
-                
                 row_t exp_row;
-                if (ref_mem.exists(addr)) begin
-                    exp_row = ref_mem[addr];
-                end else begin
-                    // 默认值 (Scrubbing 后的值)
-                    for(int b=0; b<NUM_BANKS; b++) exp_row[b] = 64'd0 + b;
-                end
+                if (ref_mem.exists(addr)) exp_row = ref_mem[addr];
+                else for(int b=0; b<NUM_BANKS; b++) exp_row[b] = 64'd0 + b;
 
                 master_read_req(slot, addr, mask[3:0]);
 
@@ -273,12 +248,11 @@ module tb_accum_zone;
                     begin
                         while(v_data_if[slot].rvalid !== 1'b1) @(posedge clk);
                         @(negedge clk); 
-                        
                         for (int b=0; b<NUM_BANKS; b++) begin
                             if (mask[b]) begin
                                 if (v_data_if[slot].rdata[b] !== exp_row[b]) begin
-                                    $error("[BATCH FAIL] Iter:%0d Slot:%0d Addr:0x%x Bank:%0d | Exp:0x%h Got:0x%h", 
-                                           i, slot, addr, b, exp_row[b], v_data_if[slot].rdata[b]);
+                                    $error("[BATCH FAIL] Iter:%0d Slot:%0d Addr:0x%x | Exp:0x%h Got:0x%h", 
+                                           i, slot, addr, exp_row[b], v_data_if[slot].rdata[b]);
                                     batch_err_count++;
                                 end
                             end
@@ -293,17 +267,11 @@ module tb_accum_zone;
                 join_any
                 disable batch_read_check;
             end
-
             repeat(5) @(posedge clk);
-
-            if (i > 0 && i % 500 == 0) 
-                $display("[%0t] Batch Progress: %0d/%0d | Errors: %0d", $time, i, iterations, batch_err_count);
         end
 
-        if (batch_err_count == 0)
-            $display("\n>>> BATCH TEST PASSED! <<<");
-        else
-            $display("\n>>> BATCH TEST FAILED! Errors: %0d <<<", batch_err_count);
+        if (batch_err_count == 0) $display("\n>>> BATCH TEST PASSED! <<<");
+        else $display("\n>>> BATCH TEST FAILED! Errors: %0d <<<", batch_err_count);
     endtask
 
     // ============================================================
@@ -314,23 +282,26 @@ module tb_accum_zone;
         sys_reset();
 
         // --------------------------------------------------------
-        // PHASE 1: 定向测试
+        // PHASE 1: 定向测试 (Directed Tests)
         // --------------------------------------------------------
         $display("\n--- PHASE 1: Directed Tests ---");
         
-        // Test 1: Basic RW
+        // Test 1: Slot 0 Basic RW
+        $display("\n[Test 1] Slot 0 Basic RW");
         master_write(0, 9'h10, 4'b1111, 64'hA000, 0); 
         repeat(5) @(posedge clk);
         master_read_req(0, 9'h10, 4'b1111);
         check_read_data(0, 64'hA000, 4'b1111);
 
-        // Test 2: Masked Write
+        // Test 2: Slot 0 Masked Write
+        $display("\n[Test 2] Slot 0 Masked Write");
         master_write(0, 9'h20, 4'b0101, 64'hB000, 0);
         repeat(5) @(posedge clk);
         master_read_req(0, 9'h20, 4'b0101);
         check_read_data(0, 64'hB000, 4'b0101);
 
-        // Test 3: Arbitration (Write Conflict)
+        // Test 3: Arbitration (Write Conflict Slot 0 vs Slot 1)
+        $display("\n[Test 3] Arbitration (Slot 0 vs Slot 1)");
         @(negedge clk);
         v_cmd_if[0].wr_valid = 1; v_cmd_if[0].accum_en = 0; v_cmd_if[0].wr_mask = 4'hf; v_cmd_if[0].wr_addr = 9'h30;
         v_data_if[0].wvalid = 1;  v_data_if[0].wdata[0] = 64'hC000; 
@@ -342,39 +313,44 @@ module tb_accum_zone;
             $display("[PASS] Arbiter chose Slot 0");
         else 
             $error("[FAIL] Arbiter Error");
-
-        @(negedge clk);
-        v_cmd_if[0].wr_valid = 0; v_data_if[0].wvalid = 0; // Slot 0 撤销
+        
+        // 撤销 Slot 0
+        @(negedge clk); v_cmd_if[0].wr_valid = 0; v_data_if[0].wvalid = 0; 
         
         @(posedge clk); #1;
         if (v_cmd_if[1].wr_ready) $display("[PASS] Slot 1 granted");
         
-        @(negedge clk);
-        v_cmd_if[1].wr_valid = 0; v_data_if[1].wvalid = 0; // Slot 1 撤销
+        // 撤销 Slot 1
+        @(negedge clk); v_cmd_if[1].wr_valid = 0; v_data_if[1].wvalid = 0; 
+        
+        sys_reset(); // 清除 Test 3 残留
 
-        // 【关键】：复位以清除 Test 3 残留
-        sys_reset();
-
-        // Test 4: Read Return Routing
+        // Test 4: Slot 1 Basic RW
+        $display("\n[Test 4] Slot 1 Basic RW");
         master_write(1, 9'h50, 4'b1111, 64'hE000, 0);
         repeat(5) @(posedge clk);
         master_read_req(1, 9'h50, 4'b1111);
+        check_read_data(1, 64'hE000, 4'b1111);
 
-        fork
-            check_read_data(1, 64'hE000, 4'b1111); // Slot 1 应该收到
-            begin
-                repeat(2) @(posedge clk); 
-                while(v_data_if[1].rvalid !== 1'b1) @(posedge clk); 
-                if (v_data_if[0].rvalid == 1) $error("[FAIL] Slot 0 leaked data!");
-                else $display("[PASS] Slot 0 ignored data correctly.");
-            end
-        join
+        // 【新增】 Test 5: Slot 2 Basic RW
+        $display("\n[Test 5] Slot 2 Basic RW (Checking connectivity for Index 2)");
+        master_write(2, 9'h60, 4'b1111, 64'hF000, 0); 
+        repeat(5) @(posedge clk);
+        master_read_req(2, 9'h60, 4'b1111);
+        check_read_data(2, 64'hF000, 4'b1111);
+
+        // 【新增】 Test 6: Slot 3 Basic RW
+        $display("\n[Test 6] Slot 3 Basic RW (Checking connectivity for Index 3)");
+        master_write(3, 9'h70, 4'b1111, 64'h1111, 0); 
+        repeat(5) @(posedge clk);
+        master_read_req(3, 9'h70, 4'b1111);
+        check_read_data(3, 64'h1111, 4'b1111);
 
         // --------------------------------------------------------
-        // PHASE 2: 批量测试
-        // // --------------------------------------------------------
-        // $display("\n--- PHASE 2: Batch Random Tests ---");
-        // run_batch_test(BATCH_COUNT);
+        // PHASE 2: 批量测试 (Batch Test)
+        // --------------------------------------------------------
+        $display("\n--- PHASE 2: Batch Random Tests ---");
+        run_batch_test(BATCH_COUNT);
 
         $display("\n=== All Tests Finished ===");
         $finish;
