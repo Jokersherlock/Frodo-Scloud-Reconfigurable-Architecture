@@ -322,7 +322,7 @@ async def tb_acc_slice(dut):
 
     dut._log.info("==== Test 6: bulk random burst acc test ====")
 
-    BURST_GROUPS = 100
+    BURST_GROUPS = 1000
     BURST_LEN_MIN = 4
     BURST_LEN_MAX = 12
     BURST_ADDR_MAX = 16
@@ -372,7 +372,7 @@ async def tb_acc_slice(dut):
 
     dut._log.info("==== Test 7: mixed random regression ====")
 
-    MIXED_ITERS = 1000
+    MIXED_ITERS = 10000
     MIXED_ADDR_MAX = 32
     MIXED_DATA_MAX = 128
 
