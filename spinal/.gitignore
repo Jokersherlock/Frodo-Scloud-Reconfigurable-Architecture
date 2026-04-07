@@ -1,0 +1,20 @@
+# SBT build outputs
+target/
+project/target/
+project/project/
+
+# SpinalHDL simulation workspace (generated artifacts)
+simWorkspace/
+
+# IDE / language server caches
+.bsp/
+.metals/
+.idea/
+.vscode/
+.scala-build/
+
+# Misc OS/editor junk
+.DS_Store
+*.swp
+*.swo
+*~

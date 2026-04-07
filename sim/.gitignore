@@ -1,0 +1,32 @@
+# Python / pytest / cocotb caches
+**/__pycache__/
+**/*.py[cod]
+.pytest_cache/
+
+# Cocotb / simulator build outputs
+**/sim_build/
+**/obj_dir/
+
+# Common cocotb outputs
+**/results.xml
+
+# Waveforms / dumps
+**/*.vcd
+**/*.fst
+**/*.ghw
+**/*.wlf
+**/*.lxt
+**/*.lxt2
+**/*.lxt3
+**/*.lxt4
+**/*.vpd
+**/*.fsdb
+
+# Coverage reports
+.coverage
+coverage.xml
+htmlcov/
+
+# Logs / temp
+**/*.log
+**/*.tmp
