@@ -1,3 +1,6 @@
+import os
+import random
+
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge
@@ -11,7 +14,6 @@ async def reset_dut(dut, cycles=5):
     """
     同步高电平复位
     """
-
     dut.reset.value = 1
 
     dut.rd_en.value = 0
@@ -87,7 +89,6 @@ async def read_addr(dut, addr):
     """
     同步读接口：1拍发请求 + 1拍返回数据
     """
-
     issue_read(dut, addr)
     await RisingEdge(dut.clk)
 
@@ -113,7 +114,7 @@ async def check_read(dut, addr, expected, msg=""):
 # ============================================================
 
 @cocotb.test()
-async def test_accslice(dut):
+async def tb_acc_slice(dut):
 
     # --------------------------------------------------------
     # Start clock
@@ -125,16 +126,28 @@ async def test_accslice(dut):
     # --------------------------------------------------------
     await reset_dut(dut)
 
+    # --------------------------------------------------------
+    # Config
+    # --------------------------------------------------------
+    DATA_WIDTH = 64
+    MASK = (1 << DATA_WIDTH) - 1
+
+    # 可以通过环境变量改随机种子
+    # 例如：make RANDOM_SEED=123
+    seed = int(os.getenv("RANDOM_SEED", "42"))
+    random.seed(seed)
+    dut._log.info(f"==== RANDOM_SEED = {seed} ====")
+
     golden = {}
 
     def gget(addr):
         return golden.get(addr, 0)
 
     def gwrite(addr, data):
-        golden[addr] = data
+        golden[addr] = data & MASK
 
     def gacc(addr, data):
-        golden[addr] = gget(addr) + data
+        golden[addr] = (gget(addr) + data) & MASK
 
     # ========================================================
     # Test 1: basic write/read
@@ -248,12 +261,161 @@ async def test_accslice(dut):
     await check_read(dut, 8, gget(8), "write+acc burst")
 
     # ========================================================
+    # Test 5: 大批量随机测试（宽松模式）
+    #
+    # 目的：
+    #   先用“操作后留足够拍数”的方式，验证大量随机功能正确性
+    # ========================================================
+
+    dut._log.info("==== Test 5: bulk random test (relaxed mode) ====")
+
+    RELAXED_ITERS = 1000
+    RELAXED_ADDR_MAX = 32
+    RELAXED_DATA_MAX = 256
+
+    for i in range(RELAXED_ITERS):
+        op = random.randint(0, 99)
+        addr = random.randint(0, RELAXED_ADDR_MAX - 1)
+        data = random.randint(0, RELAXED_DATA_MAX - 1)
+
+        if op < 35:
+            # 普通写
+            issue_write(dut, addr, data)
+            gwrite(addr, data)
+            await step(dut)
+
+            issue_idle(dut)
+            await step(dut, 3)
+
+            # 偶尔立刻检查
+            if random.random() < 0.2:
+                await check_read(dut, addr, gget(addr), f"relaxed-write-{i}")
+
+        elif op < 80:
+            # acc
+            issue_acc(dut, addr, data)
+            gacc(addr, data)
+            await step(dut)
+
+            issue_idle(dut)
+            await step(dut, 5)
+
+            # 偶尔立刻检查
+            if random.random() < 0.2:
+                await check_read(dut, addr, gget(addr), f"relaxed-acc-{i}")
+
+        else:
+            # 读检查
+            await check_read(dut, addr, gget(addr), f"relaxed-read-{i}")
+            issue_idle(dut)
+            await step(dut, 1)
+
+    # ========================================================
+    # Test 6: 大批量随机突发 acc 测试（burst mode）
+    #
+    # 目的：
+    #   连续每拍都发 acc，专门测试打拍/连续累加/交替地址累加
+    #
+    # 策略：
+    #   先打一串 burst，再 drain，最后统一检查
+    # ========================================================
+
+    dut._log.info("==== Test 6: bulk random burst acc test ====")
+
+    BURST_GROUPS = 100
+    BURST_LEN_MIN = 4
+    BURST_LEN_MAX = 12
+    BURST_ADDR_MAX = 16
+    BURST_DATA_MAX = 64
+
+    for g in range(BURST_GROUPS):
+        burst_ops = []
+
+        burst_len = random.randint(BURST_LEN_MIN, BURST_LEN_MAX)
+
+        for _ in range(burst_len):
+            addr = random.randint(0, BURST_ADDR_MAX - 1)
+            data = random.randint(0, BURST_DATA_MAX - 1)
+            burst_ops.append((addr, data))
+
+        dut._log.info(f"[BURST {g}] len={burst_len} ops={burst_ops}")
+
+        # 连续每拍打一条 acc
+        for addr, data in burst_ops:
+            issue_acc(dut, addr, data)
+            gacc(addr, data)
+            await step(dut)
+
+        # 停下来，让内部流水排空
+        issue_idle(dut)
+        await step(dut, 12)
+
+        # 随机检查若干地址
+        for _ in range(5):
+            addr = random.randint(0, BURST_ADDR_MAX - 1)
+            await check_read(dut, addr, gget(addr), f"burst-check-group-{g}-addr-{addr}")
+
+    # ========================================================
+    # Test 7: 混合随机测试（write / acc / read，适中压力）
+    #
+    # 目的：
+    #   同时覆盖：
+    #     - 写后立刻 acc
+    #     - 连续 acc
+    #     - 交替地址
+    #     - 随机读检查
+    #
+    # 注意：
+    #   这里不做完全“每拍都随机乱发”的极限压力，
+    #   而是控制一定的 drain，避免接口约束不明确时误报。
+    # ========================================================
+
+    dut._log.info("==== Test 7: mixed random regression ====")
+
+    MIXED_ITERS = 1000
+    MIXED_ADDR_MAX = 32
+    MIXED_DATA_MAX = 128
+
+    for i in range(MIXED_ITERS):
+        op = random.randint(0, 99)
+        addr = random.randint(0, MIXED_ADDR_MAX - 1)
+        data = random.randint(0, MIXED_DATA_MAX - 1)
+
+        if op < 25:
+            issue_write(dut, addr, data)
+            gwrite(addr, data)
+            await step(dut)
+
+            # 短暂空闲
+            issue_idle(dut)
+            await step(dut, random.randint(1, 3))
+
+        elif op < 70:
+            # 小 burst acc
+            burst_len = random.randint(1, 4)
+            for _ in range(burst_len):
+                b_addr = random.randint(0, MIXED_ADDR_MAX - 1)
+                b_data = random.randint(0, MIXED_DATA_MAX - 1)
+                issue_acc(dut, b_addr, b_data)
+                gacc(b_addr, b_data)
+                await step(dut)
+
+            issue_idle(dut)
+            await step(dut, random.randint(4, 8))
+
+        else:
+            await check_read(dut, addr, gget(addr), f"mixed-read-{i}")
+            issue_idle(dut)
+            await step(dut, 1)
+
+    # ========================================================
     # Final check
     # ========================================================
 
     dut._log.info("==== Final check ====")
 
-    for addr in [3, 5, 6, 8]:
+    # 对前 32 个地址统一扫一遍
+    for addr in range(32):
         await check_read(dut, addr, gget(addr), f"final check {addr}")
 
     dut._log.info("==== All cocotb tests passed ====")
